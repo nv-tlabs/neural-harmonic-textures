@@ -52,7 +52,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
-$Trainer  = "$RepoRoot\gsplat\examples\simple_trainer_nht_aov.py"
+$Trainer  = "$RepoRoot\aov\examples\simple_trainer_nht_aov.py"
 
 if (-not $DataRoot) { $DataRoot = "$RepoRoot\data" }
 
@@ -60,12 +60,12 @@ $m360Indoor   = @("bonsai", "counter", "kitchen", "room")
 $m360Outdoor  = @("garden", "bicycle", "stump", "treehill", "flowers")
 
 if ($Scenes) {
-    $sceneList = $Scenes -split ","
+    $sceneList = @($Scenes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 } else {
     $sceneList = $m360Indoor + $m360Outdoor
 }
 
-$targetList = $AOVTargets -split ","
+$targetList = @($AOVTargets -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $resultBase = "$RepoRoot\results\benchmark_nht_aov"
 
 function Get-AggregatedRow {

@@ -1,3 +1,4 @@
 [submodule "gsplat"]
 	path = gsplat
 	url = https://gitlab-master.nvidia.com/jcondorlacam/gsplat-nht.git
+	branch = main

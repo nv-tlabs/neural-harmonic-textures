@@ -64,8 +64,8 @@ foreach ($s in $dbScenes) {
 }
 
 if ($Scenes) {
-    $filter = $Scenes -split ","
-    $jobs = $jobs | Where-Object { $filter -contains $_[0] }
+    $filter = ($Scenes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $jobs = @($jobs | Where-Object { $filter -contains $_[0] })
 }
 
 $allScenes = $jobs | ForEach-Object { $_[0] }

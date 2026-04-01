@@ -71,8 +71,10 @@ if (-not $SkipDB) {
 }
 
 if ($Scenes) {
-    $filter = $Scenes -split ","
-    $jobs = $jobs | Where-Object { $filter -contains $_[0] }
+    # Trim each token; @(...) ensures a single matching job stays an array of one tuple
+    # (otherwise foreach iterates the tuple's elements and treats the scene name as char[]).
+    $filter = ($Scenes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $jobs = @($jobs | Where-Object { $filter -contains $_[0] })
 }
 
 $resultBase = "$RepoRoot\results\benchmark_nht"
