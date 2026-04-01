@@ -139,7 +139,15 @@ echo "Results Summary ($AOV_TARGET)"
 echo "============================================================"
 for scene_dir in "$RESULT_BASE"/*/stats; do
     scene=$(basename $(dirname "$scene_dir"))
-    LATEST=$(ls -t "$scene_dir"/val_step*.json 2>/dev/null | grep -v per_image | head -1)
+    # Highest step in filename (mtime order can pick the wrong ckpt after multi-eval).
+    LATEST=""
+    best=-1
+    for f in "$scene_dir"/val_step*.json; do
+        [ -f "$f" ] || continue
+        case "$f" in *per_image*) continue ;; esac
+        n=$(basename "$f" | sed -n 's/^val_step\([0-9]*\)\.json$/\1/p')
+        [ -n "$n" ] && [ "$n" -gt "$best" ] && best=$n && LATEST=$f
+    done
     if [ -n "$LATEST" ]; then
         echo "  $scene: $(cat "$LATEST")"
     fi

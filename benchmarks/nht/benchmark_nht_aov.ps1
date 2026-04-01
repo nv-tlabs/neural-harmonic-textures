@@ -164,9 +164,18 @@ foreach ($target in $targetList) {
         if (-not (Test-Path $statsDir)) { continue }
 
         Write-Host "`n  $scene" -ForegroundColor Yellow
-        $valFile = Get-ChildItem "$statsDir/val*.json" -ErrorAction SilentlyContinue `
+        # Pick latest checkpoint by step in filename (e.g. val_step29999.json). String sort
+        # would wrongly prefer val_step6999 over val_step29999 because '6' > '2'.
+        $valFile = $null
+        $bestStep = -1
+        Get-ChildItem "$statsDir/val*.json" -ErrorAction SilentlyContinue `
             | Where-Object { $_.Name -notmatch "per_image" } `
-            | Sort-Object Name -Descending | Select-Object -First 1
+            | ForEach-Object {
+                if ($_.Name -match '_step(\d+)\.json$') {
+                    $s = [int]$Matches[1]
+                    if ($s -gt $bestStep) { $bestStep = $s; $valFile = $_ }
+                }
+            }
 
         if ($valFile) {
             $json = Get-Content $valFile.FullName -Raw | ConvertFrom-Json

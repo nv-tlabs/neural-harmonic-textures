@@ -1144,6 +1144,18 @@ class Runner:
                     loss = loss + tv_lam * feat_tv
                     aov_losses[f"{mode_name}_tv"] = feat_tv
 
+                # Same definitions as validation stats (lseg_psnr / lseg_cosine in JSON).
+                with torch.no_grad():
+                    aov_mse = F.mse_loss(aov_pred, aov_gt)
+                    data_range = aov_gt.max() - aov_gt.min()
+                    if data_range > 0:
+                        aov_losses[f"{mode_name}_psnr"] = 10 * torch.log10(
+                            data_range.pow(2) / aov_mse.clamp(min=1e-10)
+                        )
+                    aov_losses[f"{mode_name}_cos_sim"] = F.cosine_similarity(
+                        aov_pred, aov_gt, dim=-1
+                    ).mean()
+
             if cfg.rgb2x_data and "rgb2x" in data and "rgb2x" in aov_outputs:
                 rgb2x_gt = data["rgb2x"].to(device) / 255.0
                 rgb2x_pred = aov_outputs["rgb2x"]

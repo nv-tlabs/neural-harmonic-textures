@@ -135,33 +135,6 @@ bash scripts/eval.sh --ckpt results/nht_mcmc_1000000/garden/ckpts/ckpt_29999_ran
 
 ---
 
-## Repository Structure
-
-```
-nht-release/
-  README.md               This file
-  requirements.txt        Extra Python dependencies (beyond gsplat)
-  setup.sh / setup.ps1    One-step install script
-  gsplat/                  gsplat library (git submodule)
-  benchmarks/
-    benchmark_nht.py      Standalone runtime benchmark
-    basic_nht.sh           Quick NHT benchmark
-    nht/
-      benchmark_nht.sh           Table 2 -- controlled comparison (1M, 30k steps)
-      benchmark_nht_split.sh     Table 1 -- split-strategy (best quality)
-      benchmark_nht_high.sh      Table 7 -- high primitive count (matching default 3dgs)
-      benchmark_nht_aov.sh       AOV benchmark (LSEG / DINOv3)
-      *.ps1                      Windows PowerShell variants
-  scripts/
-    train.sh / train.ps1         Train a single scene
-    eval.sh / eval.ps1           Evaluate a checkpoint
-    view.sh / view.ps1           Launch interactive viewer
-  results/                       (created at runtime, gitignored)
-  data/                          (user-provided datasets, gitignored)
-```
-
----
-
 ## Benchmarks and dataset paths
 
 ### Running benchmarks
