@@ -320,7 +320,7 @@ class AOVDataset(torch.utils.data.Dataset):
         return data
 
     def get_aov_config(self) -> Dict[str, Any]:
-        """Return detected AOV dimensions for DeferredShaderAOVModule construction."""
+        """Return detected AOV dimensions for ``aov.deferred_shader.DeferredShaderAOVModule``."""
         cfg: Dict[str, Any] = {
             "lseg_feature_dim": self.lseg_feature_dim,
             "dinov3_feature_dim": self.dinov3_feature_dim,

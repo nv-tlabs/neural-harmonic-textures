@@ -67,7 +67,8 @@ from gsplat.nht.strategy import NHTMCMCStrategy as MCMCStrategy
 from gsplat_viewer_nht import GsplatNHTViewer, GsplatNHTRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 ## NHT ##
-from gsplat.nht.deferred_shader import HarmonicFeatures, DeferredShaderAOVModule
+from gsplat.nht.deferred_shader import HarmonicFeatures
+from aov.deferred_shader import DeferredShaderAOVModule
 
 ## TODO: this is expensive. We should think of creating a custom fused CUDA kernel for this.
 def _semantic_loss(pred: torch.Tensor, gt: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

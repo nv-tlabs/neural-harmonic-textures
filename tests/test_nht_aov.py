@@ -302,7 +302,7 @@ class TestDeferredShaderAOVModule:
     def _make_module(self, feature_dim=16, enable_view_encoding=True,
                      lseg_feature_dim=0, dinov3_feature_dim=0,
                      rgb2x_channels=None, **kwargs):
-        from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+        from aov.deferred_shader import DeferredShaderAOVModule
         return DeferredShaderAOVModule(
             feature_dim=feature_dim,
             enable_view_encoding=enable_view_encoding,
@@ -322,21 +322,24 @@ class TestDeferredShaderAOVModule:
     def test_construction_with_lseg(self):
         mod = self._make_module(lseg_feature_dim=512)
         assert mod._mode == "semantic"
-        assert hasattr(mod, "semantic_head")
-        assert mod.semantic_head.out_features == 512
+        assert mod.uses_split_rgb_aux_linear
+        assert mod.auxiliary_head is not None
+        assert mod.auxiliary_head.out_features == 512
 
     def test_construction_with_dinov3(self):
         mod = self._make_module(dinov3_feature_dim=1024)
         assert mod._mode == "semantic"
-        assert hasattr(mod, "semantic_head")
-        assert mod.semantic_head.out_features == 1024
+        assert mod.auxiliary_head is not None
+        assert mod.auxiliary_head.out_features == 1024
 
     def test_construction_with_rgb2x(self):
         channels = {"albedo": 3, "roughness": 1, "normal": 3}
         mod = self._make_module(rgb2x_channels=channels)
         assert mod._mode == "rgb2x"
         assert mod._aov_keys == ["rgb2x"]
-        assert not hasattr(mod, "semantic_head")
+        assert mod.uses_direct_fused_output
+        assert mod.fused_tcnn_sigmoid
+        assert mod.tcnn_emitted_sigmoid_outputs
         assert mod.rgb2x_channel_layout == [
             ("albedo", 3), ("normal", 3), ("roughness", 1)
         ]
@@ -349,8 +352,8 @@ class TestDeferredShaderAOVModule:
             rgb2x_channels=channels,
         )
         assert mod._mode == "semantic"
-        assert hasattr(mod, "semantic_head")
-        assert mod.semantic_head.out_features == 512 + 768 + 3 + 1
+        assert mod.auxiliary_head is not None
+        assert mod.auxiliary_head.out_features == 512 + 768 + 3 + 1
 
     def test_forward_no_aov_shape(self):
         feature_dim = 16
@@ -745,7 +748,7 @@ class TestEndToEndAOVPipeline:
 
     def test_rasterize_and_decode_lseg(self):
         from gsplat.rendering import rasterization
-        from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+        from aov.deferred_shader import DeferredShaderAOVModule
 
         feature_dim = 16
         lseg_dim = 32
@@ -777,7 +780,7 @@ class TestEndToEndAOVPipeline:
 
     def test_rasterize_and_decode_rgb2x(self):
         from gsplat.rendering import rasterization
-        from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+        from aov.deferred_shader import DeferredShaderAOVModule
 
         feature_dim = 16
         channels = {"albedo": 3, "roughness": 1, "normal": 3}
@@ -813,7 +816,7 @@ class TestEndToEndAOVPipeline:
 
     def test_rasterize_and_decode_all(self):
         from gsplat.rendering import rasterization
-        from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+        from aov.deferred_shader import DeferredShaderAOVModule
 
         feature_dim = 16
         N = 128
@@ -851,7 +854,7 @@ class TestEndToEndAOVPipeline:
 
     def test_backward_end_to_end(self):
         from gsplat.rendering import rasterization
-        from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+        from aov.deferred_shader import DeferredShaderAOVModule
 
         feature_dim = 16
         N = 128
@@ -896,7 +899,7 @@ class TestEndToEndAOVPipeline:
 class TestCheckpointRoundTrip:
 
     def test_save_load_with_aov_config(self):
-        from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+        from aov.deferred_shader import DeferredShaderAOVModule
 
         feature_dim = 16
         aov_config = {

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Superproject AOV helpers (dataset wrapper and training/view scripts).
+"""Superproject AOV stack: dataset, deferred heads, and training/view scripts.
 
-Deferred shading and core NHT logic remain in the ``gsplat`` submodule under
-``gsplat.nht``. Install this package editable from the repo root so
-``import aov`` resolves (``pip install -e .``).
+Core NHT (rasterization, ``HarmonicFeatures``, ``DeferredShaderModule``) lives in
+``gsplat.nht``. This package adds auxiliary-output training on top. Install editable
+from the repo root (``pip install -e .``) so ``import aov`` resolves.
 """
 
 from .aov_dataset import (
@@ -16,6 +16,7 @@ from .aov_dataset import (
     AOV_RGB2X_RESOURCES,
     RGB2X_DEFAULT_CHANNEL_DIMS,
 )
+from .deferred_shader import DeferredShaderAOVModule
 
 __all__ = [
     "AOVDataset",
@@ -24,4 +25,5 @@ __all__ = [
     "AOV_DINOV3_RESOURCES",
     "AOV_RGB2X_RESOURCES",
     "RGB2X_DEFAULT_CHANNEL_DIMS",
+    "DeferredShaderAOVModule",
 ]

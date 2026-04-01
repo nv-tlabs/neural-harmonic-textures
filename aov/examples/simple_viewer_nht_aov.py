@@ -35,7 +35,7 @@ import viser
 
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization
-from gsplat.nht.deferred_shader import DeferredShaderAOVModule
+from aov.deferred_shader import DeferredShaderAOVModule
 
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 from gsplat_viewer_nht_aov import GsplatNHTAOVViewer, GsplatNHTAOVRenderTabState

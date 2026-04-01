@@ -53,7 +53,6 @@ Neural Harmonic Textures yield state-of-the-art results in real-time novel view 
 ```bash
 # Clone with submodule
 git clone --recurse-submodules <repo-url>
-cd nht-release
 
 # Run the setup script (Linux)
 bash setup.sh
@@ -62,7 +61,6 @@ bash setup.sh
 ```powershell
 # Windows (PowerShell)
 git clone --recurse-submodules <repo-url>
-cd nht-release
 .\setup.ps1
 ```
 
@@ -70,7 +68,6 @@ cd nht-release
 
 ```bash
 git clone --recurse-submodules <repo-url>
-cd nht-release
 
 # Install gsplat from submodule
 pip install -e ./gsplat
@@ -152,7 +149,7 @@ nht-release/
     nht/
       benchmark_nht.sh           Table 2 -- controlled comparison (1M, 30k steps)
       benchmark_nht_split.sh     Table 1 -- split-strategy (best quality)
-      benchmark_nht_high.sh      Table 7 -- high primitive count
+      benchmark_nht_high.sh      Table 7 -- high primitive count (matching default 3dgs)
       benchmark_nht_aov.sh       AOV benchmark (LSEG / DINOv3)
       *.ps1                      Windows PowerShell variants
   scripts/
@@ -162,6 +159,66 @@ nht-release/
   results/                       (created at runtime, gitignored)
   data/                          (user-provided datasets, gitignored)
 ```
+
+---
+
+## Benchmarks and dataset paths
+
+### Running benchmarks
+
+From the **repository root** (with the environment from [Installation](#installation) and a CUDA-visible GPU):
+
+| What | Command |
+|---|---|
+| Paper Table 2 (unified MCMC) | `bash benchmarks/nht/benchmark_nht.sh` |
+| Paper Table 1 (split strategy) | `bash benchmarks/nht/benchmark_nht_split.sh` |
+| Paper Table 7 (high primitive count) | `bash benchmarks/nht/benchmark_nht_high.sh` |
+| AOV (LSEG / DINOv3/ RGB2X) | `bash benchmarks/nht/benchmark_nht_aov.sh` |
+| Quick MipNeRF-360-style sweep | `bash benchmarks/basic_nht.sh` |
+| Standalone **runtime** timing (raster + deferred MLP) | `python benchmarks/benchmark_nht.py --ckpt <ckpt.pt> --data_dir <scene_dir> --data_factor <N>` |
+
+On Windows, use the matching scripts under `benchmarks/nht/` (for example `.\benchmarks\nht\benchmark_nht.ps1`).
+
+**Useful environment variables** (bash benchmarks under `benchmarks/nht/`):
+
+| Variable | Default | Role |
+|---|---|---|
+| `GPU` | `0` | `CUDA_VISIBLE_DEVICES` for training and timing |
+| `DATA_ROOT` | `<repo>/data` | Root folder used to resolve scene paths (see below) |
+| `SCENE_LIST` | (all paper scenes) | Space-separated subset, e.g. `SCENE_LIST="garden bonsai"` |
+| `RESULT_BASE` | varies per script | Where checkpoints and stats are written |
+| `CAP_MAX`, `MAX_STEPS`, `FEATURE_DIM` | script defaults | Training budget overrides for Table 2-style runs |
+
+Flags such as `--metrics_only` (split / high / AOV) and `--runtime_only` (high) skip training or metric collection when you already have outputs. For eval plus timing on one checkpoint, use `scripts/eval.sh` / `scripts/eval.ps1` (see [Evaluation](#evaluation)).
+
+**`benchmark_nht.py` batch mode** (one timing run per scene under a results tree):
+
+```bash
+python benchmarks/benchmark_nht.py --results_dir results/benchmark_nht --scene_dir data
+```
+
+Scene names are taken from subdirectories of `--results_dir`. With `--scene_dir`, each scene path is resolved by trying `<scene_dir>/<scene>`, then `<scene_dir>/mipnerf360/<scene>`, `tandt_db/tandt`, `tandt_db/db`, and a few other dataset layouts. Use `--collect_only` to aggregate existing `stats/timing.json` files without re-running GPU timing.
+
+### Pointing the code at your data
+
+Datasets are **not** shipped with the repo. By convention they live under `<repo>/data/` (gitignored). The trainer expects a **single scene directory** in COLMAP / MipNeRF-360 style (images, poses, sparse reconstruction), passed as `--data_dir`.
+
+**Repo helper scripts** (`scripts/train.sh`, `scripts/eval.sh`, `scripts/view.sh`):
+
+- `--scene_dir` — parent directory containing one folder per scene name.
+- `--scene` — scene folder name; the full path is `scene_dir/scene`.
+
+Defaults use `data/mipnerf360` and `garden`. PowerShell equivalents use `-SceneDir` and `-Scene`.
+
+**Paper benchmark shell scripts** (`benchmarks/nht/*.sh`) set `DATA_ROOT` to the directory that **contains** the dataset trees. For each scene they search in order, for example:
+
+- **MipNeRF 360:** `DATA_ROOT/mipnerf360/<scene>`, then `DATA_ROOT/360_v2/<scene>`, then `DATA_ROOT/<scene>`.
+- **Tanks & Temples:** `DATA_ROOT/tandt_db/tandt/<scene>` or `DATA_ROOT/<scene>`.
+- **Deep Blending:** `DATA_ROOT/tandt_db/db/<scene>` or `DATA_ROOT/<scene>`.
+
+To use a different disk location, either symlink that layout under `data/` or set `DATA_ROOT` to the parent of `mipnerf360/` / `tandt_db/` (or to a flat folder of scene directories).
+
+**Direct Python** (see `gsplat/examples/simple_trainer_nht.py`): pass `--data_dir /path/to/one/scene` and `--data_factor` explicitly; no separate `scene_dir` argument in the trainer itself.
 
 ---
 
@@ -178,12 +235,11 @@ data/
 
 ### Table 2 -- Controlled Comparison (1M primitives, 30k steps)
 
-Compares 3DGS+SH, 3DGUT+SH, and 3DGUT+NHT under identical conditions.
 
 ```bash
 bash benchmarks/nht/benchmark_nht.sh
 
-# Override defaults
+# If you want to override defaults
 GPU=1 CAP_MAX=2000000 bash benchmarks/nht/benchmark_nht.sh
 SCENE_LIST="bonsai garden truck" bash benchmarks/nht/benchmark_nht.sh
 ```
@@ -251,6 +307,8 @@ bash benchmarks/nht/benchmark_nht_high.sh --metrics_only
 
 ### AOV Benchmark (Semantic / LSEG / DINOv3)
 
+> **Experimental:** AOV (arbitrary output variables / semantic heads) is an **experimental** feature and still **work in progress**. 
+
 ```bash
 # LSEG features
 bash benchmarks/nht/benchmark_nht_aov.sh
@@ -262,7 +320,7 @@ AOV_TARGET=dinov3 bash benchmarks/nht/benchmark_nht_aov.sh
 SCENE_LIST="garden bonsai" AOV_TARGET=lseg bash benchmarks/nht/benchmark_nht_aov.sh
 ```
 
-AOV targets expect **precomputed** maps on disk. See `gsplat/gsplat/nht/aov_dataset.py` for the on-disk layout and links to external projects.
+Training reads **precomputed** maps from disk: LSEG features, DINOv3 features, and optional RGB2X channels (albedo, roughness, etc.). This repository does **not** ship those models or preprocessing pipelines as dependencies—you must **generate (or otherwise obtain) the AOV dataset yourself** before running `benchmark_nht_aov.sh` or `aov/examples/simple_trainer_nht_aov.py`, and lay it out next to your RGB captures as documented in `aov/aov_dataset.py` (expected directory names, file formats, and pointers to external projects you can adapt).
 
 ---
 
