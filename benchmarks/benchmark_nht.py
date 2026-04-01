@@ -35,6 +35,8 @@ Usage (collect previously saved timing JSONs without re-running):
     python benchmark_nht.py --results_dir results/nht_mcmc --collect_only
 """
 
+from __future__ import annotations
+
 import argparse
 import glob
 import json
@@ -43,6 +45,34 @@ import re
 import subprocess
 import sys
 from collections import OrderedDict
+
+
+def _prepend_gsplat_examples_path() -> None:
+    """Colmap dataset loaders live under gsplat/examples/datasets (not an installable package)."""
+    bench_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(bench_dir)
+    examples = os.path.join(repo_root, "gsplat", "examples")
+    if os.path.isdir(examples):
+        ap = os.path.abspath(examples)
+        if ap not in sys.path:
+            sys.path.insert(0, ap)
+
+
+_prepend_gsplat_examples_path()
+
+
+def _subprocess_cwd_for_gsplat_jit() -> str | None:
+    """Windows JIT in gsplat_internal uses sources as paths relative to the gsplat_internal root."""
+    if sys.platform != "win32":
+        return None
+    bench_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(bench_dir)
+    gsi = os.path.join(repo_root, "gsplat_internal")
+    marker = os.path.join(gsi, "gsplat", "cuda", "csrc", "AdamCUDA.cu")
+    if os.path.isfile(marker):
+        return gsi
+    return None
+
 
 M360_INDOOR = {"bonsai", "counter", "kitchen", "room"}
 M360_OUTDOOR = {"garden", "bicycle", "stump", "treehill", "flowers"}
@@ -472,7 +502,8 @@ def _run_batch(args):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
-        proc = subprocess.run(cmd, env=env)
+        jit_cwd = _subprocess_cwd_for_gsplat_jit()
+        proc = subprocess.run(cmd, env=env, cwd=jit_cwd)
         if proc.returncode != 0:
             print(f"    ERROR: subprocess exited with code {proc.returncode}")
             missing.append(scene)
