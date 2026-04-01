@@ -17,9 +17,9 @@ SPDX-License-Identifier: Apache-2.0
 <sup>1</sup>Universit&agrave; della Svizzera italiana, Lugano, Switzerland &nbsp;&nbsp;
 <sup>2</sup>NVIDIA
 
-[[Paper]](#) &nbsp;
-[[Project Page]](#) &nbsp;
-[[Video]](#)
+[[Paper]](https://research.nvidia.com/labs/sil/projects/neural-harmonic-textures/assets/neural_harmonic_textures.pdf) &nbsp;
+[[Project Page]](https://research.nvidia.com/labs/sil/projects/neural-harmonic-textures/) &nbsp;
+[[Video]](https://research.nvidia.com/labs/sil/projects/neural-harmonic-textures/videos/video_nht_titleless.mp4)
 
 <!-- TODO: add teaser image -->
 
