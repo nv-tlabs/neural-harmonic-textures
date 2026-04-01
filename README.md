@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 [[Project Page]](https://research.nvidia.com/labs/sil/projects/neural-harmonic-textures/) &nbsp;
 [[Video]](https://research.nvidia.com/labs/sil/projects/neural-harmonic-textures/videos/video_nht_titleless.mp4)
 
-<!-- TODO: add teaser image -->
+<img src="assets/teaser.jpg" alt="Neural Harmonic Textures teaser" width="100%">
 
 </div>
 
