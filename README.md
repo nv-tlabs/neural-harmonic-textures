@@ -52,7 +52,7 @@ Neural Harmonic Textures yield state-of-the-art results in real-time novel view 
 
 ```bash
 # Clone with submodule
-git clone --recurse-submodules <repo-url>
+git clone --recursive https://github.com/nv-tlabs/neural-harmonic-textures.git
 
 # Run the setup script (Linux)
 bash setup.sh
@@ -60,14 +60,14 @@ bash setup.sh
 
 ```powershell
 # Windows (PowerShell)
-git clone --recurse-submodules <repo-url>
+git clone --recursive https://github.com/nv-tlabs/neural-harmonic-textures.git
 .\setup.ps1
 ```
 
 ### Manual setup
 
 ```bash
-git clone --recurse-submodules <repo-url>
+git clone --recursive https://github.com/nv-tlabs/neural-harmonic-textures.git
 
 # Install gsplat from submodule
 pip install -e ./gsplat
@@ -278,9 +278,9 @@ bash benchmarks/nht/benchmark_nht_high.sh --runtime_only
 bash benchmarks/nht/benchmark_nht_high.sh --metrics_only
 ```
 
-### AOV Benchmark (Semantic / LSEG / DINOv3)
+### AOV Mode (RGB2X / LSEG / DINOv3)
 
-> **Experimental:** AOV (arbitrary output variables / semantic heads) is an **experimental** feature and still **work in progress**. 
+> **Experimental:** AOV (arbitrary output variables / semantic heads) is an **experimental** feature and still **work in progress**. Expect varying quality and performance. 
 
 ```bash
 # LSEG features
@@ -293,7 +293,7 @@ AOV_TARGET=dinov3 bash benchmarks/nht/benchmark_nht_aov.sh
 SCENE_LIST="garden bonsai" AOV_TARGET=lseg bash benchmarks/nht/benchmark_nht_aov.sh
 ```
 
-Training reads **precomputed** maps from disk: LSEG features, DINOv3 features, and optional RGB2X channels (albedo, roughness, etc.). This repository does **not** ship those models or preprocessing pipelines as dependencies—you must **generate (or otherwise obtain) the AOV dataset yourself** before running `benchmark_nht_aov.sh` or `aov/examples/simple_trainer_nht_aov.py`, and lay it out next to your RGB captures as documented in `aov/aov_dataset.py` (expected directory names, file formats, and pointers to external projects you can adapt).
+Training reads **precomputed** maps from disk: LSEG features, DINOv3 features, and RGB2X PBR maps (albedo, roughness, etc.). This repository does **not** ship those models or preprocessing pipelines as dependencies—you must **generate (or otherwise obtain) the AOV dataset yourself** before running `benchmark_nht_aov.sh` or `aov/examples/simple_trainer_nht_aov.py`, and lay it out next to your RGB captures as documented in `aov/aov_dataset.py` (expected directory names, file formats, and pointers to external projects you can adapt).
 
 ---
 
