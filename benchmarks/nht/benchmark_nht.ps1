@@ -18,15 +18,20 @@
     Run the full NHT MCMC benchmark across Mip-NeRF 360, Tanks & Temples,
     and Deep Blending datasets. Reproduces Table 2 from NHT paper.
 
+.DESCRIPTION
+    Result layout: <OutputRoot>\<scene> (default OutputRoot: <repo>\results\benchmark_nht)
+
 .EXAMPLE
     .\benchmarks\nht\benchmark_nht.ps1
     .\benchmarks\nht\benchmark_nht.ps1 -Scenes garden,truck
+    .\benchmarks\nht\benchmark_nht.ps1 -OutputRoot D:\runs\nht_table2
     .\benchmarks\nht\benchmark_nht.ps1 -RuntimeOnly
     .\benchmarks\nht\benchmark_nht.ps1 -MetricsOnly -Step 29999
 #>
 param(
     [string]$Scenes      = "",
     [string]$DataRoot    = "",
+    [string]$OutputRoot  = "",
     [int]$CapMax         = 1000000,
     [int]$GPU            = 0,
     [int]$Step           = -1,
@@ -77,7 +82,9 @@ if ($Scenes) {
     $jobs = @($jobs | Where-Object { $filter -contains $_[0] })
 }
 
-$resultBase = "$RepoRoot\results\benchmark_nht"
+if (-not $OutputRoot) { $OutputRoot = "$RepoRoot\results\benchmark_nht" }
+else { $OutputRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot) }
+$resultBase = $OutputRoot
 $sceneNames = $jobs | ForEach-Object { $_[0] }
 $allScenes  = $jobs | ForEach-Object { $_[0] }
 

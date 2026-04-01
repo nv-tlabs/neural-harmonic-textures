@@ -29,6 +29,7 @@
 #   bash benchmarks/nht/benchmark_nht_split.sh
 #   GPU=1 bash benchmarks/nht/benchmark_nht_split.sh
 #   SCENE_LIST="bonsai garden truck" bash benchmarks/nht/benchmark_nht_split.sh
+#   OUTPUT_ROOT=/path/to/results bash benchmarks/nht/benchmark_nht_split.sh
 #   bash benchmarks/nht/benchmark_nht_split.sh --metrics_only
 
 set -euo pipefail
@@ -39,7 +40,11 @@ TRAINER="$REPO_ROOT/gsplat/examples/simple_trainer_nht.py"
 
 GPU=${GPU:-0}
 DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/data"}
-RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht_split"}
+if [ -n "${OUTPUT_ROOT:-}" ]; then
+  RESULT_BASE="$OUTPUT_ROOT"
+else
+  RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht_split"}
+fi
 RENDER_TRAJ_PATH="ellipse"
 METRICS_ONLY=0
 

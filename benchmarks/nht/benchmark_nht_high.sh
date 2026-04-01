@@ -25,6 +25,7 @@
 #   bash benchmarks/nht/benchmark_nht_high.sh
 #   GPU=1 bash benchmarks/nht/benchmark_nht_high.sh
 #   SCENE_LIST="garden bonsai truck" bash benchmarks/nht/benchmark_nht_high.sh
+#   OUTPUT_ROOT=/path/to/results bash benchmarks/nht/benchmark_nht_high.sh
 #   bash benchmarks/nht/benchmark_nht_high.sh --metrics_only
 #   bash benchmarks/nht/benchmark_nht_high.sh --runtime_only
 
@@ -48,7 +49,11 @@ for arg in "$@"; do
         --runtime_only)   RUNTIME_ONLY=1 ;;
     esac
 done
-RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht_high"}
+if [ -n "${OUTPUT_ROOT:-}" ]; then
+  RESULT_BASE="$OUTPUT_ROOT"
+else
+  RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht_high"}
+fi
 RENDER_TRAJ_PATH="ellipse"
 
 declare -A SCENE_CAPS=(

@@ -17,15 +17,21 @@
 .SYNOPSIS
     NHT split-strategy benchmark (paper configuration). Reproduces Table 1 from NHT paper.
 
+.DESCRIPTION
+    Result layout: <OutputRoot>\<scene> (default OutputRoot: <repo>\results\benchmark_nht_split).
+    -ResultBase is an alias for -OutputRoot (backward compatible).
+
 .EXAMPLE
     .\benchmarks\nht\benchmark_nht_split.ps1
     .\benchmarks\nht\benchmark_nht_split.ps1 -Scenes garden,bonsai,truck
+    .\benchmarks\nht\benchmark_nht_split.ps1 -OutputRoot D:\runs\nht_split
     .\benchmarks\nht\benchmark_nht_split.ps1 -MetricsOnly
 #>
 param(
     [string]$Scenes     = "",
     [string]$DataRoot   = "",
-    [string]$ResultBase = "",
+    [Alias("ResultBase")]
+    [string]$OutputRoot = "",
     [int]$GPU           = 0,
     [int]$Step          = -1,
     [switch]$MetricsOnly
@@ -36,8 +42,10 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
 $Trainer  = "$RepoRoot\gsplat\examples\simple_trainer_nht.py"
 
-if (-not $DataRoot)   { $DataRoot   = "$RepoRoot\data" }
-if (-not $ResultBase) { $ResultBase = "$RepoRoot\results\benchmark_nht_split" }
+if (-not $DataRoot) { $DataRoot = "$RepoRoot\data" }
+if (-not $OutputRoot) { $OutputRoot = "$RepoRoot\results\benchmark_nht_split" }
+else { $OutputRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot) }
+$ResultBase = $OutputRoot
 
 $commonArgs = @(
     "--disable_viewer",

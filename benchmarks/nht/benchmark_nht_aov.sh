@@ -24,6 +24,7 @@
 #   bash benchmarks/nht/benchmark_nht_aov.sh
 #   GPU=1 AOV_TARGET=dinov3 bash benchmarks/nht/benchmark_nht_aov.sh
 #   SCENE_LIST="garden bonsai" AOV_TARGET=lseg bash benchmarks/nht/benchmark_nht_aov.sh
+#   OUTPUT_ROOT=/path/to/results bash benchmarks/nht/benchmark_nht_aov.sh
 #   bash benchmarks/nht/benchmark_nht_aov.sh --metrics_only
 
 set -euo pipefail
@@ -37,7 +38,11 @@ DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/data"}
 CAP_MAX=${CAP_MAX:-1000000}
 MAX_STEPS=${MAX_STEPS:-30000}
 AOV_TARGET=${AOV_TARGET:-"lseg"}
-RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht_aov"}
+if [ -n "${OUTPUT_ROOT:-}" ]; then
+  RESULT_BASE="$OUTPUT_ROOT"
+else
+  RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht_aov"}
+fi
 RENDER_TRAJ_PATH="ellipse"
 METRICS_ONLY=0
 

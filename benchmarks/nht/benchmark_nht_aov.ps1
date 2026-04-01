@@ -25,7 +25,7 @@
       dinov3 -> --dinov3_data
       rgb2x  -> --rgb2x_data
 
-    Result layout: <repo>\results\benchmark_nht_aov\<target>\<scene>
+    Result layout: <OutputRoot>\<target>\<scene> (default OutputRoot: <repo>\results\benchmark_nht_aov)
 
     Modes:
       (default)      Train + eval + collect metrics
@@ -36,11 +36,13 @@
 .EXAMPLE
     .\benchmarks\nht\benchmark_nht_aov.ps1
     .\benchmarks\nht\benchmark_nht_aov.ps1 -Scenes garden,bonsai -AOVTargets dinov3
+    .\benchmarks\nht\benchmark_nht_aov.ps1 -OutputRoot D:\runs\nht_aov
     .\benchmarks\nht\benchmark_nht_aov.ps1 -MetricsOnly
 #>
 param(
     [string]$Scenes      = "",
     [string]$DataRoot    = "",
+    [string]$OutputRoot  = "",
     [string]$AOVTargets  = "lseg",
     [int]$CapMax         = 1000000,
     [int]$GPU            = 0,
@@ -66,7 +68,9 @@ if ($Scenes) {
 }
 
 $targetList = @($AOVTargets -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$resultBase = "$RepoRoot\results\benchmark_nht_aov"
+if (-not $OutputRoot) { $OutputRoot = "$RepoRoot\results\benchmark_nht_aov" }
+else { $OutputRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot) }
+$resultBase = $OutputRoot
 
 function Get-AggregatedRow {
     param([string]$Label, [string[]]$SceneSubset, [hashtable]$AllMetrics, [string[]]$Keys)

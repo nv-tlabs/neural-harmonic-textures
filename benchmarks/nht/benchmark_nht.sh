@@ -21,6 +21,7 @@
 #   bash benchmarks/nht/benchmark_nht.sh
 #   GPU=1 CAP_MAX=2000000 bash benchmarks/nht/benchmark_nht.sh
 #   SCENE_LIST="bonsai garden truck" bash benchmarks/nht/benchmark_nht.sh
+#   OUTPUT_ROOT=/path/to/results bash benchmarks/nht/benchmark_nht.sh
 
 set -euo pipefail
 
@@ -33,7 +34,11 @@ DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/data"}
 CAP_MAX=${CAP_MAX:-1000000}
 MAX_STEPS=${MAX_STEPS:-30000}
 FEATURE_DIM=${FEATURE_DIM:-64}
-RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht"}
+if [ -n "${OUTPUT_ROOT:-}" ]; then
+  RESULT_BASE="$OUTPUT_ROOT"
+else
+  RESULT_BASE=${RESULT_BASE:-"$REPO_ROOT/results/benchmark_nht"}
+fi
 RENDER_TRAJ_PATH="ellipse"
 
 M360_INDOOR=("bonsai" "counter" "kitchen" "room")

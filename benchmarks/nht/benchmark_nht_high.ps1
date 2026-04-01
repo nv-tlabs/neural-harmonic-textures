@@ -33,9 +33,12 @@
 
     -DataRoot defaults to <repo>\data when empty.
 
+    Result layout: <OutputRoot>\<scene> (default OutputRoot: <repo>\results\benchmark_nht_high)
+
 .EXAMPLE
     .\benchmarks\nht\benchmark_nht_high.ps1
     .\benchmarks\nht\benchmark_nht_high.ps1 -Scenes garden,truck
+    .\benchmarks\nht\benchmark_nht_high.ps1 -OutputRoot D:\runs\nht_high
     .\benchmarks\nht\benchmark_nht_high.ps1 -RuntimeOnly
     .\benchmarks\nht\benchmark_nht_high.ps1 -MetricsOnly -Step 29999
     .\benchmarks\nht\benchmark_nht_high.ps1 -SkipTandT -SkipDB
@@ -43,6 +46,7 @@
 param(
     [string]$Scenes      = "",
     [string]$DataRoot    = "",
+    [string]$OutputRoot  = "",
     [int]$GPU            = 0,
     [int]$MaxSteps       = 30000,
     [int]$FeatureDim     = 64,
@@ -101,7 +105,9 @@ if ($Scenes) {
     $jobs = @($jobs | Where-Object { $filter -contains $_[0] })
 }
 
-$resultBase = "$RepoRoot\results\benchmark_nht_high"
+if (-not $OutputRoot) { $OutputRoot = "$RepoRoot\results\benchmark_nht_high" }
+else { $OutputRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot) }
+$resultBase = $OutputRoot
 $sceneNames = $jobs | ForEach-Object { $_[0] }
 $allScenes  = $jobs | ForEach-Object { $_[0] }
 
