@@ -68,7 +68,7 @@ if (-not $nhtExists) {
 }
 
 Write-Host "[2/5] Initializing gsplat submodule..." -ForegroundColor Green
-git submodule update --init --recursive --remote
+git submodule update --init --recursive
 
 Write-Host "[3/5] CUDA + PyTorch (CUDA wheels)..." -ForegroundColor Green
 $cudaOk = Set-CudaHomeFromToolkit
