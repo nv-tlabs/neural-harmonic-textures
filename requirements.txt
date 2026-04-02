@@ -1,3 +1,0 @@
-# Install gsplat's example dependencies (covers all training/eval/viewer needs).
-# gsplat itself should already be installed
--r gsplat/examples/requirements.txt

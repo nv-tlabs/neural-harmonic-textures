@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Setup script for NHT.
-# Creates conda env "nht", initializes the gsplat submodule, and installs dependencies.
+# Creates a .venv with uv, initializes the gsplat submodule, and installs dependencies.
 
 $ErrorActionPreference = "Stop"
 Push-Location $PSScriptRoot
@@ -59,13 +59,17 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "NHT Release Setup" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 
-Write-Host "[1/5] Ensuring conda environment 'nht' exists..." -ForegroundColor Green
-$nhtExists = conda env list | Select-String -Pattern '^\s*nht\s' -Quiet
-if (-not $nhtExists) {
-    conda create -n nht python=3.11 -y
-} else {
-    Write-Host "  Conda env 'nht' already exists; skipping create." -ForegroundColor DarkGray
+# Check that uv is available
+$uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $uvCmd) {
+    Write-Host "ERROR: 'uv' is not installed." -ForegroundColor Red
+    Write-Host "  Install it with:  powershell -ExecutionPolicy ByPass -c `"irm https://astral.sh/uv/install.ps1 | iex`"" -ForegroundColor Yellow
+    throw "uv is required. Install it and re-run setup."
 }
+
+Write-Host "[1/5] Creating virtual environment (.venv, Python 3.11)..." -ForegroundColor Green
+uv venv --python 3.11 .venv
+& .\.venv\Scripts\Activate.ps1
 
 Write-Host "[2/5] Initializing gsplat submodule..." -ForegroundColor Green
 git submodule update --init --recursive
@@ -80,15 +84,14 @@ if (-not $cudaOk) {
 }
 $wheelUrl = Get-PyTorchWheelIndexUrl
 Write-Host "  PyTorch wheel index: $wheelUrl" -ForegroundColor DarkGray
-conda run -n nht pip install -U pip
-conda run -n nht pip install "setuptools>=42" wheel ninja numpy rich
-conda run -n nht pip install torch==2.9.1 torchvision==0.24.1 --index-url $wheelUrl
+uv pip install "setuptools==78.1.1" wheel ninja numpy rich
+uv pip install torch==2.9.1 torchvision==0.24.1 --index-url $wheelUrl
 
 Write-Host "[4/5] Installing gsplat..." -ForegroundColor Green
-conda run -n nht pip install --no-build-isolation -e ./gsplat
+uv pip install --no-build-isolation -e ./gsplat
 
 Write-Host "[4b/5] Installing aov package (AOV helpers)..." -ForegroundColor Green
-conda run -n nht pip install --no-build-isolation -e .
+uv pip install --no-build-isolation -e .
 
 Write-Host "[5/5] Installing example dependencies..." -ForegroundColor Green
 $examplesReq = Join-Path $PSScriptRoot "gsplat\examples\requirements.txt"
@@ -121,18 +124,18 @@ if os.name == "nt":
             $utf8NoBom = New-Object System.Text.UTF8Encoding $false
             [System.IO.File]::WriteAllText($setupPy, $setupText, $utf8NoBom)
         }
-        conda run -n nht pip install --no-build-isolation .
+        uv pip install --no-build-isolation .
     } finally {
         Pop-Location
     }
-    conda run -n nht pip install --no-build-isolation -r $filteredReq
+    uv pip install --no-build-isolation -r $filteredReq
 } else {
-    conda run -n nht pip install --no-build-isolation -r $examplesReq
+    uv pip install --no-build-isolation -r $examplesReq
 }
 
 Write-Host ""
 Write-Host "Setup complete. Activate the environment, then run:" -ForegroundColor Green
-Write-Host "  conda activate nht"
+Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host "  .\scripts\train.ps1                              # Train a scene"
 Write-Host "  .\scripts\view.ps1 -Ckpt <path>                  # View a trained model"
 Write-Host "  .\benchmarks\nht\benchmark_XXX.ps1               # Reproduce paper results"

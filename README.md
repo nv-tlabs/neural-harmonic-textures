@@ -50,30 +50,58 @@ Neural Harmonic Textures yield state-of-the-art results in real-time novel view 
 
 ### Quick setup
 
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) (will auto-download Python 3.11 if needed).
+
 ```bash
 # Clone with submodule
 git clone --recursive https://github.com/nv-tlabs/neural-harmonic-textures.git
 
 # Run the setup script (Linux)
+cd neural-harmonic-textures
 bash setup.sh
+source .venv/bin/activate
 ```
 
 ```powershell
 # Windows (PowerShell)
 git clone --recursive https://github.com/nv-tlabs/neural-harmonic-textures.git
+cd neural-harmonic-textures
 .\setup.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
 ### Manual setup
 
 ```bash
 git clone --recursive https://github.com/nv-tlabs/neural-harmonic-textures.git
+cd neural-harmonic-textures
+uv venv --python 3.11 .venv && source .venv/bin/activate
 
-# Install gsplat from submodule
-pip install -e ./gsplat
+# Build dependencies + PyTorch (adjust --index-url for your CUDA version)
+uv pip install "setuptools==78.1.1" wheel ninja numpy rich
+uv pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu126
 
-# Install additional dependencies
-pip install -r requirements.txt
+# Install gsplat from submodule (needs torch at build time)
+uv pip install --no-build-isolation -e ./gsplat
+
+# Install the aov helpers package and remaining dependencies
+uv pip install --no-build-isolation -e .
+uv pip install --no-build-isolation -r gsplat/examples/requirements.txt
+```
+
+### Dataset
+
+Download the [MipNeRF 360](http://storage.googleapis.com/gresearch/refraw360/360_v2.zip) dataset and extract it under `data/`:
+
+```bash
+bash scripts/download_data.sh
+```
+
+Your directory layout should look like:
+
+```
+data/
+  mipnerf360/{garden,bicycle,stump,bonsai,counter,kitchen,room,...}
 ```
 
 ---
