@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cuda_version: ["12.9.1", "13.2.0"]
+        cuda_version: ["12.9.1", "13.0.2"]
     container:
       image: nvidia/cuda:${{ matrix.cuda_version }}-cudnn-devel-ubuntu24.04
     env:
@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cuda_version: ["12.9.1", "13.2.0"]
+        cuda_version: ["12.9.1", "13.0.2"]
     env:
       CUDA_VERSION: ${{ matrix.cuda_version }}
 
