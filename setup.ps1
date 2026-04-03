@@ -68,7 +68,7 @@ if (-not $uvCmd) {
 }
 
 Write-Host "[1/5] Creating virtual environment (.venv, Python 3.11)..." -ForegroundColor Green
-uv venv --python 3.11 .venv
+uv venv --python 3.11 --prompt nht .venv
 & .\.venv\Scripts\Activate.ps1
 
 Write-Host "[2/5] Initializing gsplat submodule..." -ForegroundColor Green

@@ -15,6 +15,13 @@ ensure_cuda_home() {
     echo "  Using CUDA_HOME=${CUDA_HOME}"
     return 0
   fi
+  if command -v nvcc &>/dev/null; then
+    local nvcc_path
+    nvcc_path="$(command -v nvcc)"
+    export CUDA_HOME="$(dirname "$(dirname "$nvcc_path")")"
+    echo "  Set CUDA_HOME=${CUDA_HOME} (from nvcc in PATH)"
+    return 0
+  fi
   if [[ -d /usr/local/cuda ]]; then
     export CUDA_HOME=/usr/local/cuda
     echo "  Set CUDA_HOME=${CUDA_HOME}"
@@ -76,7 +83,7 @@ if ! command -v uv &>/dev/null; then
 fi
 
 echo "[1/5] Creating virtual environment (.venv, Python 3.11)..."
-uv venv --python 3.11 .venv
+uv venv --python 3.11 --prompt nht .venv
 source .venv/bin/activate
 
 export CC="$(which gcc)"
@@ -97,7 +104,8 @@ echo "  PyTorch wheel index: ${WHEEL_URL}"
 uv pip install "setuptools==78.1.1" wheel ninja numpy rich
 uv pip install torch==2.9.1 torchvision==0.24.1 --index-url "${WHEEL_URL}"
 
-export TORCH_CUDA_ARCH_LIST=$(python -c "import torch,re;print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")+PTX
+export TORCH_CUDA_ARCH_LIST=$(uv run python -c "import torch,re;print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")+PTX
+echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
 
 echo "[4/5] Installing gsplat..."
 uv pip install --no-build-isolation -e ./gsplat
@@ -115,10 +123,30 @@ if ! grep -q "# --- NHT env vars ---" "$ACTIVATE" 2>/dev/null; then
   cat >> "$ACTIVATE" <<ENVEOF
 
 # --- NHT env vars ---
+_NHT_OLD_CC="\${CC:-}"
+_NHT_OLD_CXX="\${CXX:-}"
+_NHT_OLD_CUDA_HOME="\${CUDA_HOME:-}"
+_NHT_OLD_TORCH_CUDA_ARCH_LIST="\${TORCH_CUDA_ARCH_LIST:-}"
 export CC="${CC}"
 export CXX="${CXX}"
 export CUDA_HOME="${CUDA_HOME}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+ENVEOF
+  cat >> "$ACTIVATE" <<'ENVEOF'
+
+# Wrap deactivate to undo NHT env vars
+if ! declare -f _nht_orig_deactivate >/dev/null 2>&1; then
+  eval "$(echo '_nht_orig_deactivate()'; declare -f deactivate | tail -n +2)"
+  deactivate () {
+    if [ -n "${_NHT_OLD_CC:-}" ]; then export CC="${_NHT_OLD_CC}"; else unset CC 2>/dev/null; fi
+    if [ -n "${_NHT_OLD_CXX:-}" ]; then export CXX="${_NHT_OLD_CXX}"; else unset CXX 2>/dev/null; fi
+    if [ -n "${_NHT_OLD_CUDA_HOME:-}" ]; then export CUDA_HOME="${_NHT_OLD_CUDA_HOME}"; else unset CUDA_HOME 2>/dev/null; fi
+    if [ -n "${_NHT_OLD_TORCH_CUDA_ARCH_LIST:-}" ]; then export TORCH_CUDA_ARCH_LIST="${_NHT_OLD_TORCH_CUDA_ARCH_LIST}"; else unset TORCH_CUDA_ARCH_LIST 2>/dev/null; fi
+    unset _NHT_OLD_CC _NHT_OLD_CXX _NHT_OLD_CUDA_HOME _NHT_OLD_TORCH_CUDA_ARCH_LIST
+    _nht_orig_deactivate "$@"
+  }
+fi
+# --- end NHT env vars ---
 ENVEOF
   echo "  Persisted CC, CXX, CUDA_HOME, TORCH_CUDA_ARCH_LIST in ${ACTIVATE}"
 fi
