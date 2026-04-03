@@ -427,7 +427,7 @@ All paper results were measured on an **NVIDIA RTX A6000 Ada** (48 GB, Ada Lovel
 @article{condor2026nht,
   title={Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction},
   author={Condor, Jorge and Moenne-Loccoz, Nicolas and Nimier-David, Merlin and Didyk, Piotr and Gojcic, Zan and Wu, Qi},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  journal={arXiv preprint arXiv:2604.01204},
   year={2026}
 }
 ```
