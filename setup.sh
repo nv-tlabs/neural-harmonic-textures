@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Setup script for NHT paper release.
-# Creates conda env "nht", initializes the gsplat submodule, and installs dependencies.
+# Creates a .venv with uv, initializes the gsplat submodule, and installs dependencies.
 
 set -euo pipefail
 
@@ -13,6 +13,13 @@ cd "$SCRIPT_DIR"
 ensure_cuda_home() {
   if [[ -n "${CUDA_HOME:-}" ]] && [[ -x "${CUDA_HOME}/bin/nvcc" ]]; then
     echo "  Using CUDA_HOME=${CUDA_HOME}"
+    return 0
+  fi
+  if command -v nvcc &>/dev/null; then
+    local nvcc_path
+    nvcc_path="$(command -v nvcc)"
+    export CUDA_HOME="$(dirname "$(dirname "$nvcc_path")")"
+    echo "  Set CUDA_HOME=${CUDA_HOME} (from nvcc in PATH)"
     return 0
   fi
   if [[ -d /usr/local/cuda ]]; then
@@ -44,13 +51,11 @@ get_pytorch_wheel_index() {
     return
   fi
   local cuda_ver=""
-  # Try nvcc --version first (most reliable)
   if [[ -n "${CUDA_HOME:-}" && -x "${CUDA_HOME}/bin/nvcc" ]]; then
     cuda_ver="$("${CUDA_HOME}/bin/nvcc" --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+')" || true
   elif command -v nvcc &>/dev/null; then
     cuda_ver="$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+')" || true
   fi
-  # Fall back to version.json (CUDA 11.1+), then version.txt
   if [[ -z "$cuda_ver" && -n "${CUDA_HOME:-}" ]]; then
     if [[ -f "${CUDA_HOME}/version.json" ]]; then
       cuda_ver="$(python -c "import json,pathlib; d=json.loads(pathlib.Path('${CUDA_HOME}/version.json').read_text()); print(d['cuda']['version'])" 2>/dev/null)" || true
@@ -70,20 +75,19 @@ echo "============================================"
 echo "NHT Release Setup"
 echo "============================================"
 
-eval "$(conda shell.bash hook)"
-
-# Create and activate conda environment
-echo "[1/5] Ensuring conda environment 'nht' exists..."
-if ! conda env list | grep -qE '^\s*nht\s'; then
-  conda create -n nht python=3.11 setuptools==78.1.1 -y
-else
-  echo "  Conda env 'nht' already exists; skipping create."
+# Check that uv is available
+if ! command -v uv &>/dev/null; then
+  echo "ERROR: 'uv' is not installed." >&2
+  echo "  Install it with:  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  exit 1
 fi
 
-echo "Setting CC=$(which gcc) and CXX=$(which g++) in conda environment"
-conda activate nht
-conda env config vars set CC=$(which gcc) CXX=$(which g++)
-conda deactivate
+echo "[1/5] Creating virtual environment (.venv, Python 3.11)..."
+uv venv --python 3.11 --prompt nht .venv
+source .venv/bin/activate
+
+export CC="$(which gcc)"
+export CXX="$(which g++)"
 
 echo "[2/5] Initializing gsplat submodule..."
 git submodule update --init --recursive
@@ -97,29 +101,59 @@ if ! ensure_cuda_home; then
 fi
 WHEEL_URL="$(get_pytorch_wheel_index)"
 echo "  PyTorch wheel index: ${WHEEL_URL}"
-conda run -n nht pip install -U pip
-conda run -n nht pip install "setuptools>=42" wheel ninja numpy rich
-conda run -n nht pip install torch==2.9.1 torchvision==0.24.1 --index-url "${WHEEL_URL}"
+uv pip install "setuptools==78.1.1" wheel ninja numpy rich
+uv pip install torch==2.9.1 torchvision==0.24.1 --index-url "${WHEEL_URL}"
 
-# Set TORCH_CUDA_ARCH_LIST for gsplat
-export TORCH_CUDA_ARCH_LIST=$(conda run -n nht python -c "import torch,re;print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")+PTX
-echo "Setting TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} in conda environment"
-conda activate nht
-conda env config vars set TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
-conda deactivate
+export TORCH_CUDA_ARCH_LIST=$(uv run python -c "import torch,re;print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")+PTX
+echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
 
 echo "[4/5] Installing gsplat..."
-conda run -n nht pip install --no-build-isolation -e ./gsplat
+uv pip install --no-build-isolation -e ./gsplat
 
 echo "[4b/5] Installing 'aov' package (AOV helpers)..."
-conda run -n nht pip install --no-build-isolation -e .
+uv pip install --no-build-isolation -e .
 
 echo "[5/5] Installing example dependencies..."
-conda run -n nht pip install --no-build-isolation -r gsplat/examples/requirements.txt
+uv pip install --no-build-isolation -r gsplat/examples/requirements.txt
+
+# Persist environment variables into the venv activation script so they are
+# restored automatically on `source .venv/bin/activate`.
+ACTIVATE=".venv/bin/activate"
+if ! grep -q "# --- NHT env vars ---" "$ACTIVATE" 2>/dev/null; then
+  cat >> "$ACTIVATE" <<ENVEOF
+
+# --- NHT env vars ---
+_NHT_OLD_CC="\${CC:-}"
+_NHT_OLD_CXX="\${CXX:-}"
+_NHT_OLD_CUDA_HOME="\${CUDA_HOME:-}"
+_NHT_OLD_TORCH_CUDA_ARCH_LIST="\${TORCH_CUDA_ARCH_LIST:-}"
+export CC="${CC}"
+export CXX="${CXX}"
+export CUDA_HOME="${CUDA_HOME}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+ENVEOF
+  cat >> "$ACTIVATE" <<'ENVEOF'
+
+# Wrap deactivate to undo NHT env vars
+if ! declare -f _nht_orig_deactivate >/dev/null 2>&1; then
+  eval "$(echo '_nht_orig_deactivate()'; declare -f deactivate | tail -n +2)"
+  deactivate () {
+    if [ -n "${_NHT_OLD_CC:-}" ]; then export CC="${_NHT_OLD_CC}"; else unset CC 2>/dev/null; fi
+    if [ -n "${_NHT_OLD_CXX:-}" ]; then export CXX="${_NHT_OLD_CXX}"; else unset CXX 2>/dev/null; fi
+    if [ -n "${_NHT_OLD_CUDA_HOME:-}" ]; then export CUDA_HOME="${_NHT_OLD_CUDA_HOME}"; else unset CUDA_HOME 2>/dev/null; fi
+    if [ -n "${_NHT_OLD_TORCH_CUDA_ARCH_LIST:-}" ]; then export TORCH_CUDA_ARCH_LIST="${_NHT_OLD_TORCH_CUDA_ARCH_LIST}"; else unset TORCH_CUDA_ARCH_LIST 2>/dev/null; fi
+    unset _NHT_OLD_CC _NHT_OLD_CXX _NHT_OLD_CUDA_HOME _NHT_OLD_TORCH_CUDA_ARCH_LIST
+    _nht_orig_deactivate "$@"
+  }
+fi
+# --- end NHT env vars ---
+ENVEOF
+  echo "  Persisted CC, CXX, CUDA_HOME, TORCH_CUDA_ARCH_LIST in ${ACTIVATE}"
+fi
 
 echo ""
 echo "Setup complete. Activate the environment, then run:"
-echo "  conda activate nht"
+echo "  source .venv/bin/activate"
 echo "  bash scripts/train.sh                         # Train a scene"
 echo "  bash scripts/view.sh --ckpt <path>            # View a trained model"
 echo "  bash benchmarks/nht/benchmark_XXX.sh          # Reproduce paper results"
