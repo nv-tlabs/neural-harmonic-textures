@@ -68,12 +68,13 @@ get_pytorch_wheel_index() {
     echo "https://download.pytorch.org/whl/cu${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
     return
   fi
-  echo "https://download.pytorch.org/whl/cu126"
+  echo "https://download.pytorch.org/whl"
 }
 
 echo "============================================"
 echo "NHT Release Setup"
 echo "============================================"
+export UV_PREVIEW_FEATURES="extra-build-dependencies"
 
 # Check that uv is available
 if ! command -v uv &>/dev/null; then
@@ -99,19 +100,30 @@ if ! ensure_cuda_home; then
   echo "  Optional: export PYTORCH_CUDA_INDEX (e.g. cu126, cu128) to match your stack." >&2
   exit 1
 fi
-WHEEL_URL="$(get_pytorch_wheel_index)"
-echo "  PyTorch wheel index: ${WHEEL_URL}"
-uv pip install "setuptools==78.1.1" wheel ninja numpy rich
-uv pip install torch==2.9.1 torchvision==0.24.1 --index-url "${WHEEL_URL}"
+export UV_INDEX="pytorch=$(get_pytorch_wheel_index)"
+echo "  PyTorch wheel index: ${UV_INDEX}"
 
-export TORCH_CUDA_ARCH_LIST=$(uv run python -c "import torch,re;print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")+PTX
+local_torch_cuda_arch_list=$(uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+if [ -z "${local_torch_cuda_arch_list}" ]; then
+  echo "WARNING: No CUDA architecture list found for torch. Using default: 9.0"
+  local_torch_cuda_arch_list="9.0"
+fi
+export TORCH_CUDA_ARCH_LIST="${local_torch_cuda_arch_list}+PTX"
 echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
 
-echo "[4/5] Installing gsplat..."
-uv pip install --no-build-isolation -e ./gsplat
+local_tcnn_cuda_arch_list=$(uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+if [ -z "${local_tcnn_cuda_arch_list}" ]; then
+  echo "WARNING: No CUDA architecture list found for tcnn. Using default: 90"
+  local_tcnn_cuda_arch_list="90"
+fi
+export TCNN_CUDA_ARCHITECTURES="${local_tcnn_cuda_arch_list}"
+echo "TCNN_CUDA_ARCHITECTURES: ${TCNN_CUDA_ARCHITECTURES}"
 
-echo "[4b/5] Installing 'aov' package (AOV helpers)..."
+echo "[4a/5] Installing 'aov' package (AOV helpers)..."
 uv pip install --no-build-isolation -e .
+
+echo "[4b/5] Installing gsplat..."
+uv pip install --no-build-isolation -e ./gsplat
 
 echo "[5/5] Installing example dependencies..."
 uv pip install --no-build-isolation -r gsplat/examples/requirements.txt
@@ -127,10 +139,12 @@ _NHT_OLD_CC="\${CC:-}"
 _NHT_OLD_CXX="\${CXX:-}"
 _NHT_OLD_CUDA_HOME="\${CUDA_HOME:-}"
 _NHT_OLD_TORCH_CUDA_ARCH_LIST="\${TORCH_CUDA_ARCH_LIST:-}"
+_NHT_OLD_TCNN_CUDA_ARCHITECTURES="\${TCNN_CUDA_ARCHITECTURES:-}"
 export CC="${CC}"
 export CXX="${CXX}"
 export CUDA_HOME="${CUDA_HOME}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+export TCNN_CUDA_ARCHITECTURES="${TCNN_CUDA_ARCHITECTURES}"
 ENVEOF
   cat >> "$ACTIVATE" <<'ENVEOF'
 
@@ -142,7 +156,8 @@ if ! declare -f _nht_orig_deactivate >/dev/null 2>&1; then
     if [ -n "${_NHT_OLD_CXX:-}" ]; then export CXX="${_NHT_OLD_CXX}"; else unset CXX 2>/dev/null; fi
     if [ -n "${_NHT_OLD_CUDA_HOME:-}" ]; then export CUDA_HOME="${_NHT_OLD_CUDA_HOME}"; else unset CUDA_HOME 2>/dev/null; fi
     if [ -n "${_NHT_OLD_TORCH_CUDA_ARCH_LIST:-}" ]; then export TORCH_CUDA_ARCH_LIST="${_NHT_OLD_TORCH_CUDA_ARCH_LIST}"; else unset TORCH_CUDA_ARCH_LIST 2>/dev/null; fi
-    unset _NHT_OLD_CC _NHT_OLD_CXX _NHT_OLD_CUDA_HOME _NHT_OLD_TORCH_CUDA_ARCH_LIST
+    if [ -n "${_NHT_OLD_TCNN_CUDA_ARCHITECTURES:-}" ]; then export TCNN_CUDA_ARCHITECTURES="${_NHT_OLD_TCNN_CUDA_ARCHITECTURES}"; else unset TCNN_CUDA_ARCHITECTURES 2>/dev/null; fi
+    unset _NHT_OLD_CC _NHT_OLD_CXX _NHT_OLD_CUDA_HOME _NHT_OLD_TORCH_CUDA_ARCH_LIST _NHT_OLD_TCNN_CUDA_ARCHITECTURES
     _nht_orig_deactivate "$@"
   }
 fi

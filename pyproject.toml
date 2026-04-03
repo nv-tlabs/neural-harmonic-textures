@@ -5,17 +5,34 @@
 # Run from repo root: pip install -e .
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>64,<80"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aov"
 version = "0.0.0"
-description = "NHT release AOV helpers (dataset wrapper and training/view scripts)"
+description = "NHT release (dataset wrapper and training/view scripts)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "setuptools>64,<80",
+    "wheel",
+    "ninja",
+    "numpy",
+    "rich",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["aov*"]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl"
+default = true

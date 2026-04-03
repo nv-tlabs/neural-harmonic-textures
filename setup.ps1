@@ -52,7 +52,7 @@ function Get-PyTorchWheelIndexUrl {
             return "https://download.pytorch.org/whl/cu$maj$min"
         }
     }
-    return "https://download.pytorch.org/whl/cu126"
+    return "https://download.pytorch.org/whl"
 }
 
 Write-Host "============================================" -ForegroundColor Cyan
@@ -84,14 +84,31 @@ if (-not $cudaOk) {
 }
 $wheelUrl = Get-PyTorchWheelIndexUrl
 Write-Host "  PyTorch wheel index: $wheelUrl" -ForegroundColor DarkGray
-uv pip install "setuptools==78.1.1" wheel ninja numpy rich
-uv pip install torch==2.9.1 torchvision==0.24.1 --index-url $wheelUrl
+$env:UV_INDEX="pytorch=$wheelUrl"
 
-Write-Host "[4/5] Installing gsplat..." -ForegroundColor Green
-uv pip install --no-build-isolation -e ./gsplat
+# Setup TORCH_CUDA_ARCH_LIST
+$torchCudaArchList = (uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+if (-not $torchCudaArchList) {
+    Write-Host "  WARNING: No CUDA architecture list found for torch. Using default: 9.0" -ForegroundColor Yellow
+    $torchCudaArchList = "9.0"
+}
+$env:TORCH_CUDA_ARCH_LIST = $torchCudaArchList + "+PTX"
 
-Write-Host "[4b/5] Installing aov package (AOV helpers)..." -ForegroundColor Green
+# Setup TCNN_CUDA_ARCHITECTURES
+$tcnnCudaArchList = (uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+if (-not $tcnnCudaArchList) {
+    Write-Host "  WARNING: No CUDA architecture list found for tcnn. Using default: 90" -ForegroundColor Yellow
+    $tcnnCudaArchList = "90"
+}
+$env:TCNN_CUDA_ARCHITECTURES = $tcnnCudaArchList
+Write-Host "  TCNN_CUDA_ARCHITECTURES: $($env:TCNN_CUDA_ARCHITECTURES)" -ForegroundColor DarkGray
+
+# Install dependencies
+Write-Host "[4b/5] Installing 'aov' package (AOV helpers)..." -ForegroundColor Green
 uv pip install --no-build-isolation -e .
+
+Write-Host "[4a/5] Installing gsplat..." -ForegroundColor Green
+uv pip install --no-build-isolation -e ./gsplat
 
 Write-Host "[5/5] Installing example dependencies..." -ForegroundColor Green
 $examplesReq = Join-Path $PSScriptRoot "gsplat\examples\requirements.txt"

@@ -28,3 +28,5 @@ Thumbs.db
 .cursor/
 gsplat_internal/
 gsplat_oss/
+
+uv.lock
