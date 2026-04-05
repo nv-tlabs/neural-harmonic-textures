@@ -16,6 +16,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "setuptools>64,<80",
+    "wheel",
+    "ninja",
+    "numpy",
+    "rich",
     "torch==2.9.1",
     "torchvision==0.24.1",
 ]
