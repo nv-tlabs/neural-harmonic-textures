@@ -199,8 +199,8 @@ uv pip install --no-build-isolation -e ./gsplat
 
 Write-Host "[5/5] Installing example dependencies..." -ForegroundColor Green
 $examplesReq = Join-Path $PSScriptRoot "gsplat\examples\requirements.txt"
-$isWindows = ($PSVersionTable.PSVersion.Major -ge 6 -and $IsWindows) -or ($PSVersionTable.PSVersion.Major -lt 6 -and $env:OS -match "Windows")
-if ($isWindows) {
+$isReallyWindows = ($PSVersionTable.PSVersion.Major -ge 6 -and $IsWindows) -or ($PSVersionTable.PSVersion.Major -lt 6 -and $env:OS -match "Windows")
+if ($isReallyWindows) {
     # PyTorch 2.9+ on Windows: nvcc host passes do not define _WIN32, so torch dynamo headers take the
     # wrong branch and MSVC fails with C2872 'std': ambiguous symbol (pytorch#148317). fused-ssim's setup
     # does not add the workaround; install a pinned clone with extra nvcc defines, then the rest of reqs.
