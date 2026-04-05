@@ -104,7 +104,7 @@ export UV_INDEX="pytorch=$(get_pytorch_wheel_index)"
 echo "  PyTorch wheel index: ${UV_INDEX}"
 
 echo "[3b/5] Installing pytorch and 'nht' package (AOV helpers)..."
-uv pip install --no-build-isolation -e .
+uv pip install -e .
 
 # Determine CUDA architectures from local PyTorch installation and set env vars for building torch extensions.
 local_torch_cuda_arch_list=$(uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
