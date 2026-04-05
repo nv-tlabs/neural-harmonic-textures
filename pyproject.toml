@@ -33,6 +33,7 @@ where = ["."]
 include = ["aov*"]
 
 [[tool.uv.index]]
+# The PyTorch index is controlled externally by setting UV_INDEX="pytorch=<index_url>"
 name = "pytorch"
 url = "https://download.pytorch.org/whl"
 default = true
