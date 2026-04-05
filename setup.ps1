@@ -7,6 +7,8 @@
 $ErrorActionPreference = "Stop"
 Push-Location $PSScriptRoot
 
+$env:DISTUTILS_USE_SDK = "1"
+
 function Set-CudaHomeFromToolkit {
     # Simple, deterministic search for CUDA_HOME
 
@@ -158,18 +160,32 @@ Write-Host "  PyTorch wheel index: $wheelUrl" -ForegroundColor DarkGray
 $env:UV_INDEX="pytorch=$wheelUrl"
 
 Write-Host "[3b/5] Installing pytorch and 'nht' package (AOV helpers)..." -ForegroundColor Green
-uv pip install --no-build-isolation -e .
+uv pip install -e .
 
-# Setup TORCH_CUDA_ARCH_LIST
-$torchCudaArchList = (uv run python -c "import torch, re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+# Setup TORCH_CUDA_ARCH_LIST and TCNN_CUDA_ARCHITECTURES properly based on the installed PyTorch's supported CUDA architectures, with a 
+# minimum of 7.0 (Ampere) to avoid long compile times for older unsupported architectures. Having a minimum capability is to avoid the 
+# following compilation issue:
+#
+# error: namespace "cooperative_groups" has no member "labeled_partition"
+# DEBUG       auto warp_group_g = cg::labeled_partition(warp, gid);
+# DEBUG                               ^
+# DEBUG  
+#
+# See: https://forums.developer.nvidia.com/t/cuda-11-4-cooperative-groups-no-longer-supported-on-sm-7-0/194001
+# See: https://github.com/nerfstudio-project/gsplat/issues/653
+#
+# Add PTX to TORCH_CUDA_ARCH_LIST to allow JIT compilation for newer architectures not in the list. Tiny-CUDA-NN always generate PTX for 
+# each specified architecture, so we don't need to add +PTX to TCNN_CUDA_ARCHITECTURES.
+$minCudaArch = 70
+
+$torchCudaArchList = uv run python -c "import torch,re; min_arch = $minCudaArch; print(';'.join(m.group(1)+'.'+m.group(2)+m.group(3) for s in torch.cuda.get_arch_list() for m in [re.match(r'sm_(\d+)(\d)([a-z]?)$', s)] if m and int(m.group(1)+m.group(2)) >= min_arch))"
 if (-not $torchCudaArchList) {
     Write-Host "  WARNING: No CUDA architecture list found for torch. Using default: 9.0" -ForegroundColor Yellow
     $torchCudaArchList = "9.0"
 }
 $env:TORCH_CUDA_ARCH_LIST = $torchCudaArchList + "+PTX"
 
-# Setup TCNN_CUDA_ARCHITECTURES
-$tcnnCudaArchList = (uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+$tcnnCudaArchList = uv run python -c "import torch,re; min_arch = $minCudaArch; print(';'.join(m.group(1)+m.group(2)+m.group(3) for s in torch.cuda.get_arch_list() for m in [re.match(r'sm_(\d+)(\d)([a-z]?)$', s)] if m and int(m.group(1)+m.group(2)) >= min_arch))"
 if (-not $tcnnCudaArchList) {
     Write-Host "  WARNING: No CUDA architecture list found for tcnn. Using default: 90" -ForegroundColor Yellow
     $tcnnCudaArchList = "90"
