@@ -8,51 +8,120 @@ $ErrorActionPreference = "Stop"
 Push-Location $PSScriptRoot
 
 function Set-CudaHomeFromToolkit {
+    # Simple, deterministic search for CUDA_HOME
+
+    # 1) respect existing valid CUDA_HOME
     if ($env:CUDA_HOME -and (Test-Path (Join-Path $env:CUDA_HOME "bin\nvcc.exe"))) {
-        Write-Host "  Using CUDA_HOME=$($env:CUDA_HOME)" -ForegroundColor DarkGray
+        Write-Host "  [INFO] Using existing CUDA_HOME: $($env:CUDA_HOME)" 'DarkGray'
         return $true
     }
-    $base = "${env:ProgramFiles}\NVIDIA GPU Computing Toolkit\CUDA"
-    if (-not (Test-Path $base)) {
-        return $false
+
+    # 2) nvcc on PATH -> infer parent parent of nvcc.exe
+    $nvccCmd = Get-Command nvcc -ErrorAction SilentlyContinue
+    if ($nvccCmd) {
+        try {
+            $nvccBin = Split-Path $nvccCmd.Path -Parent
+            $candidate = Split-Path $nvccBin -Parent
+            if (Test-Path (Join-Path $candidate "bin\nvcc.exe")) {
+                $env:CUDA_HOME = $candidate
+                Write-Host "  Set CUDA_HOME from nvcc: $($env:CUDA_HOME)" -ForegroundColor Yellow
+                return $true
+            }
+        } catch { Write-Host "  Error inferring CUDA_HOME from nvcc: $_" -ForegroundColor Yellow }
     }
-    $best = Get-ChildItem $base -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(v)?\d+\.\d+' } |
-        ForEach-Object {
-            $verStr = $_.Name.TrimStart('v')
-            try {
-                [PSCustomObject]@{ Dir = $_; Ver = [version]$verStr }
-            } catch { $null }
-        } |
-        Where-Object { $null -ne $_ } |
-        Sort-Object -Property Ver -Descending |
-        Select-Object -First 1
-    if ($best) {
-        $env:CUDA_HOME = $best.Dir.FullName
-        Write-Host "  Set CUDA_HOME=$($env:CUDA_HOME)" -ForegroundColor Yellow
-        return $true
+
+    # 3) check common install roots and pick highest version
+    $roots = @()
+    if ($env:ProgramFiles) { $roots += Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA" }
+    if (${env:ProgramFiles(x86)}) { $roots += Join-Path ${env:ProgramFiles(x86)} "NVIDIA GPU Computing Toolkit\CUDA" }
+    $roots += "C:\\CUDA"
+
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        $vers = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(v)?\d+\.\d+' }
+        if (-not $vers) { continue }
+        $best = $vers | ForEach-Object { $_ } | Sort-Object { [version]($_.Name.TrimStart('v')) } -Descending | Select-Object -First 1
+        if ($best -and (Test-Path (Join-Path $best.FullName "bin\nvcc.exe"))) {
+            $env:CUDA_HOME = $best.FullName
+            Write-Host "  Set CUDA_HOME=$($env:CUDA_HOME)" -ForegroundColor Yellow
+            return $true
+        }
     }
+
     return $false
 }
 
 function Get-PyTorchWheelIndexUrl {
     if ($env:PYTORCH_CUDA_INDEX) {
         $idx = $env:PYTORCH_CUDA_INDEX.Trim()
-        if (-not $idx.StartsWith("http")) {
-            return "https://download.pytorch.org/whl/$idx"
-        }
+        if (-not $idx.StartsWith("http")) { return "https://download.pytorch.org/whl/$idx" }
         return $idx
     }
-    $verFile = if ($env:CUDA_HOME) { Join-Path $env:CUDA_HOME "version.txt" } else { $null }
-    if ($verFile -and (Test-Path $verFile)) {
-        $line = (Get-Content $verFile -TotalCount 1) -join ""
-        if ($line -match '(\d+)\.(\d+)') {
-            $maj = $matches[1]
-            $min = $matches[2]
-            return "https://download.pytorch.org/whl/cu$maj$min"
+
+    # helper: parse major.minor from a version-like string
+    function Parse-MajorMinor($s) {
+        if ($s -and ($s -match '(\d+)\.(\d+)')) { return @{maj=$matches[1]; min=$matches[2]} }
+        return $null
+    }
+
+    # 1) nvcc --version
+    $nvccCmd = Get-Command nvcc -ErrorAction SilentlyContinue
+    if ($nvccCmd) {
+        try {
+            $out = (& $nvccCmd.Path --version 2>&1) -join ' '
+            $pm = Parse-MajorMinor $out
+            if ($pm) { return "https://download.pytorch.org/whl/cu$($pm.maj)$($pm.min)" }
+        } catch { Write-Host "  [WARNING] nvcc --version failed: $_" -ForegroundColor Yellow }
+    }
+
+    # 2) version.json under CUDA_HOME
+    if ($env:CUDA_HOME) {
+        $jsonFile = Join-Path $env:CUDA_HOME "version.json"
+        if (Test-Path $jsonFile) {
+            try {
+                $j = Get-Content $jsonFile -Raw | ConvertFrom-Json
+                $verCandidates = @()
+                if ($j.version) { $verCandidates += $j.version }
+                if ($j.cuda -and $j.cuda.version) { $verCandidates += $j.cuda.version }
+                # scan nested strings
+                foreach ($p in $j.PSObject.Properties) {
+                    $v = $p.Value
+                    if ($v -is [string]) { $verCandidates += $v }
+                    elseif ($v -ne $null) {
+                        foreach ($sp in $v.PSObject.Properties) { if ($sp.Value -is [string]) { $verCandidates += $sp.Value } }
+                    }
+                }
+                foreach ($c in $verCandidates) { $pm = Parse-MajorMinor $c; if ($pm) { return "https://download.pytorch.org/whl/cu$($pm.maj)$($pm.min)" } }
+            } catch { Write-Host "  [WARNING] Failed to parse version.json: $_" -ForegroundColor Yellow }
+        }
+
+        # 3) version.txt
+        $verFile = Join-Path $env:CUDA_HOME "version.txt"
+        if (Test-Path $verFile) {
+            try {
+                $line = (Get-Content $verFile -TotalCount 1) -join ''
+                $pm = Parse-MajorMinor $line
+                if ($pm) { return "https://download.pytorch.org/whl/cu$($pm.maj)$($pm.min)" }
+            } catch { }
         }
     }
-    return "https://download.pytorch.org/whl"
+
+    # 4) fallback: try version.txt adjacent to nvcc (if nvcc found)
+    if ($nvccCmd) {
+        try {
+            $maybeCuda = Split-Path (Split-Path $nvccCmd.Path -Parent) -Parent
+            $tryVerFile = Join-Path $maybeCuda "version.txt"
+            if (Test-Path $tryVerFile) {
+                $line = (Get-Content $tryVerFile -TotalCount 1) -join ''
+                $pm = Parse-MajorMinor $line
+                if ($pm) { return "https://download.pytorch.org/whl/cu$($pm.maj)$($pm.min)" }
+            }
+        } catch { }
+    }
+
+    # Error out here:
+    Write-Host "ERROR: Could not determine CUDA version for PyTorch wheel index. Please set PYTORCH_CUDA_INDEX (e.g. cu126) or provide a valid CUDA_HOME." -ForegroundColor Red
+    throw "Cannot determine PyTorch CUDA wheel index. Set PYTORCH_CUDA_INDEX or provide a valid CUDA_HOME."
 }
 
 Write-Host "============================================" -ForegroundColor Cyan
@@ -74,7 +143,7 @@ uv venv --python 3.11 --prompt nht .venv
 Write-Host "[2/5] Initializing gsplat submodule..." -ForegroundColor Green
 git submodule update --init --recursive
 
-Write-Host "[3/5] CUDA + PyTorch (CUDA wheels)..." -ForegroundColor Green
+Write-Host "[3a/5] CUDA + PyTorch (CUDA wheels)..." -ForegroundColor Green
 $cudaOk = Set-CudaHomeFromToolkit
 if (-not $cudaOk) {
     Write-Host "  WARNING: CUDA toolkit not found and CUDA_HOME is not set." -ForegroundColor Yellow
@@ -82,12 +151,17 @@ if (-not $cudaOk) {
     Write-Host "  Optional: set PYTORCH_CUDA_INDEX (e.g. cu126, cu128) to match your driver/toolkit." -ForegroundColor Yellow
     throw "Cannot build gsplat without CUDA. Set CUDA_HOME or install the NVIDIA CUDA Toolkit."
 }
+Write-Host "  Found CUDA toolkit at $env:CUDA_HOME" -ForegroundColor DarkGray
+
 $wheelUrl = Get-PyTorchWheelIndexUrl
 Write-Host "  PyTorch wheel index: $wheelUrl" -ForegroundColor DarkGray
 $env:UV_INDEX="pytorch=$wheelUrl"
 
+Write-Host "[3b/5] Installing pytorch and 'nht' package (AOV helpers)..." -ForegroundColor Green
+uv pip install --no-build-isolation -e .
+
 # Setup TORCH_CUDA_ARCH_LIST
-$torchCudaArchList = (uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
+$torchCudaArchList = (uv run python -c "import torch, re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
 if (-not $torchCudaArchList) {
     Write-Host "  WARNING: No CUDA architecture list found for torch. Using default: 9.0" -ForegroundColor Yellow
     $torchCudaArchList = "9.0"
@@ -104,10 +178,7 @@ $env:TCNN_CUDA_ARCHITECTURES = $tcnnCudaArchList
 Write-Host "  TCNN_CUDA_ARCHITECTURES: $($env:TCNN_CUDA_ARCHITECTURES)" -ForegroundColor DarkGray
 
 # Install dependencies
-Write-Host "[4b/5] Installing 'aov' package (AOV helpers)..." -ForegroundColor Green
-uv pip install --no-build-isolation -e .
-
-Write-Host "[4a/5] Installing gsplat..." -ForegroundColor Green
+Write-Host "[4/5] Installing gsplat..." -ForegroundColor Green
 uv pip install --no-build-isolation -e ./gsplat
 
 Write-Host "[5/5] Installing example dependencies..." -ForegroundColor Green

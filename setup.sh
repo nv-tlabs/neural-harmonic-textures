@@ -93,7 +93,7 @@ export CXX="$(which g++)"
 echo "[2/5] Initializing gsplat submodule..."
 git submodule update --init --recursive
 
-echo "[3/5] CUDA + PyTorch (CUDA wheels)..."
+echo "[3a/5] CUDA + PyTorch (CUDA wheels)..."
 if ! ensure_cuda_home; then
   echo "  ERROR: CUDA toolkit not found and CUDA_HOME is not set." >&2
   echo "  Install CUDA 12.x (with nvcc) or set CUDA_HOME, then re-run setup." >&2
@@ -103,6 +103,10 @@ fi
 export UV_INDEX="pytorch=$(get_pytorch_wheel_index)"
 echo "  PyTorch wheel index: ${UV_INDEX}"
 
+echo "[3b/5] Installing pytorch and 'nht' package (AOV helpers)..."
+uv pip install --no-build-isolation -e .
+
+# Determine CUDA architectures from local PyTorch installation and set env vars for building torch extensions.
 local_torch_cuda_arch_list=$(uv run python -c "import torch,re; print(';'.join(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s) for s in torch.cuda.get_arch_list()))")
 if [ -z "${local_torch_cuda_arch_list}" ]; then
   echo "WARNING: No CUDA architecture list found for torch. Using default: 9.0"
@@ -119,10 +123,7 @@ fi
 export TCNN_CUDA_ARCHITECTURES="${local_tcnn_cuda_arch_list}"
 echo "TCNN_CUDA_ARCHITECTURES: ${TCNN_CUDA_ARCHITECTURES}"
 
-echo "[4a/5] Installing 'aov' package (AOV helpers)..."
-uv pip install --no-build-isolation -e .
-
-echo "[4b/5] Installing gsplat..."
+echo "[4/5] Installing gsplat..."
 uv pip install --no-build-isolation -e ./gsplat
 
 echo "[5/5] Installing example dependencies..."
