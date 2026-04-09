@@ -91,7 +91,11 @@ export CC="$(which gcc)"
 export CXX="$(which g++)"
 
 echo "[2/5] Initializing gsplat submodule..."
-git submodule update --init --recursive --remote
+if ! git submodule update --init --remote; then
+  echo "WARNING: --remote fetch failed; falling back to pinned submodule commit." >&2
+  git submodule update --init
+fi
+git submodule foreach git submodule update --init --recursive
 
 echo "[3a/5] CUDA + PyTorch (CUDA wheels)..."
 if ! ensure_cuda_home; then
