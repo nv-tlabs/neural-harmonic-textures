@@ -1,0 +1,109 @@
+name: Continuous Integration
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+on:
+  push:
+    branches: [main, cicd]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}:${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-linux:
+    name: build linux (CUDA ${{ matrix.cuda_version }})
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version:
+          - "12.9.1"
+          - "13.0.2"
+
+    env:
+      CUDA_VERSION: ${{ matrix.cuda_version }}
+      PYTHON_VERSION: "3.11"
+
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # this might remove tools that are actually needed,
+          # when set to "true" but frees about 6 GB
+          tool-cache: true
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.34
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda_version }}
+          method: network
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: "3.11"
+          enable-cache: "false"
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install NHT including all dependencies
+        run: |
+          git config --global --add safe.directory "$(pwd)"
+          bash ./setup.sh
+
+  build-windows:
+    name: build windows (CUDA ${{ matrix.cuda_version }})
+    runs-on: windows-latest
+ 
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version:
+          - "12.8.0"
+          - "13.0.0"
+    env:
+      CUDA_VERSION: ${{ matrix.cuda_version }}
+
+    steps:
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64  # Options: x86, x64, arm64
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.34
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda_version }}
+          method: network
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: "3.11"
+          enable-cache: "false"
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+ 
+      - name: Install NHT including all dependencies
+        shell: pwsh
+        run: |
+          .\setup.ps1
