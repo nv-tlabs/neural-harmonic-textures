@@ -197,9 +197,15 @@ function Ensure-VsBuildEnvironment {
 
     # Smoke test — cl.exe prints its banner to stderr and exits non-zero
     # when called with no arguments, so we capture both streams.
+    # Temporarily relax error preference since cl.exe writes to stderr.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
     $clOutput = & $clCmd.Path 2>&1 | Select-Object -First 1
+    $ErrorActionPreference = $prevEAP
     if ($clOutput -match 'Microsoft.*Compiler') {
         Write-Host "  cl.exe version: $clOutput" -ForegroundColor DarkGray
+    } elseif ($clOutput -match 'cl|usage') {
+        Write-Host "  cl.exe responds (version banner on stderr, build should work)" -ForegroundColor DarkGray
     } else {
         Write-Host "  WARNING: cl.exe returned unexpected output: $clOutput" -ForegroundColor Yellow
         Write-Host "  Build may still fail. Consider running from an 'x64 Native Tools Command Prompt'." -ForegroundColor Yellow
