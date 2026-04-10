@@ -131,14 +131,16 @@ function Ensure-VsBuildEnvironment {
     # where.exe searches the real PATH that child processes inherit.
     $whereResult = $null
     try { $whereResult = (& where.exe cl.exe 2>&1) | Where-Object { $_ -is [string] -and (Test-Path $_) } | Select-Object -First 1 } catch {}
-    if ($whereResult) {
+    if ($whereResult -and $env:INCLUDE) {
         Write-Host "  cl.exe already on PATH: $whereResult" -ForegroundColor DarkGray
+        Write-Host "  INCLUDE already set ($($env:INCLUDE.Split(';').Count) entries)" -ForegroundColor DarkGray
+        $env:DISTUTILS_USE_SDK = "1"
         return
     }
 
-    Write-Host "  MSVC compiler (cl.exe) not found on system PATH. Setting up VS build environment..." -ForegroundColor Yellow
+    Write-Host "  MSVC compiler (cl.exe) not found on system PATH (or INCLUDE not set). Setting up VS build environment..." -ForegroundColor Yellow
 
-    # Locate VS installation
+    # Locate VS installation via vswhere
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $vsPath = $null
     if (Test-Path $vswhere) {
@@ -159,84 +161,47 @@ function Ensure-VsBuildEnvironment {
     }
     Write-Host "  Found VS at: $vsPath" -ForegroundColor DarkGray
 
-    # Find the newest MSVC toolset with cl.exe
-    $clPath = $null
-    $vcToolsDir = Join-Path $vsPath "VC\Tools\MSVC"
-    if (Test-Path $vcToolsDir) {
-        foreach ($ver in (Get-ChildItem $vcToolsDir -Directory | Sort-Object Name -Descending)) {
-            foreach ($hostArch in @("Hostx64\x64", "Hostx86\x64")) {
-                $candidate = Join-Path $ver.FullName "bin\$hostArch\cl.exe"
-                if (Test-Path $candidate) { $clPath = $candidate; break }
-            }
-            if ($clPath) { break }
-        }
+    # Use vcvarsall.bat to properly set up the full MSVC environment.
+    # This is the only reliable way to get PATH, INCLUDE, LIB, and all
+    # other variables that cl.exe and nvcc need (vcruntime.h, cassert, etc.).
+    $vcvarsall = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+    if (-not (Test-Path $vcvarsall)) {
+        # Fallback: try vcvars64.bat
+        $vcvarsall = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
     }
-    if (-not $clPath) {
-        Write-Host "ERROR: VS found but cl.exe binary is missing." -ForegroundColor Red
-        Write-Host "  Open Visual Studio Installer and add the 'MSVC v143 C++ x64/x86 build tools' component." -ForegroundColor Yellow
-        throw "cl.exe not found under $vcToolsDir"
+    if (-not (Test-Path $vcvarsall)) {
+        Write-Host "ERROR: vcvarsall.bat not found under $vsPath" -ForegroundColor Red
+        throw "MSVC build environment script not found. Reinstall VS Build Tools with C++ workload."
     }
-    $clDir = Split-Path $clPath -Parent
-    $msvcVer = (Split-Path (Split-Path (Split-Path $clDir -Parent) -Parent) -Leaf)
-    Write-Host "  Found cl.exe: $clPath" -ForegroundColor DarkGray
 
-    # Build PATH, INCLUDE, and LIB from the VS/SDK directory structure
-    $msvcBase = Join-Path $vsPath "VC\Tools\MSVC\$msvcVer"
-    $pathDirs = @($clDir)
-    $includeDirs = @()
-    $libDirs = @()
-
-    # MSVC includes and libs
-    $msvcInclude = Join-Path $msvcBase "include"
-    if (Test-Path $msvcInclude) { $includeDirs += $msvcInclude }
-    $msvcLib = Join-Path $msvcBase "lib\x64"
-    if (Test-Path $msvcLib) { $libDirs += $msvcLib }
-
-    # Windows SDK — find the newest version
-    $sdkRoot = $null
-    foreach ($candidate in @("${env:ProgramFiles(x86)}\Windows Kits\10", "$env:ProgramFiles\Windows Kits\10")) {
-        if (Test-Path $candidate) { $sdkRoot = $candidate; break }
-    }
-    if ($sdkRoot) {
-        $sdkIncBase = Join-Path $sdkRoot "Include"
-        $sdkVers = Get-ChildItem $sdkIncBase -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d+\.' } | Sort-Object Name -Descending
-        if ($sdkVers) {
-            $sdkVer = $sdkVers[0].Name
-            Write-Host "  Windows SDK version: $sdkVer" -ForegroundColor DarkGray
-            foreach ($sub in @("ucrt", "um", "shared", "winrt", "cppwinrt")) {
-                $d = Join-Path $sdkIncBase "$sdkVer\$sub"
-                if (Test-Path $d) { $includeDirs += $d }
-            }
-            $sdkLibUcrt = Join-Path $sdkRoot "Lib\$sdkVer\ucrt\x64"
-            $sdkLibUm = Join-Path $sdkRoot "Lib\$sdkVer\um\x64"
-            if (Test-Path $sdkLibUcrt) { $libDirs += $sdkLibUcrt }
-            if (Test-Path $sdkLibUm) { $libDirs += $sdkLibUm }
-            $sdkBin = Join-Path $sdkRoot "bin\$sdkVer\x64"
-            if (Test-Path $sdkBin) { $pathDirs += $sdkBin }
+    Write-Host "  Sourcing: $vcvarsall x64" -ForegroundColor DarkGray
+    $vcvarsCmd = if ($vcvarsall -match "vcvarsall") { "`"$vcvarsall`" x64" } else { "`"$vcvarsall`"" }
+    $envLines = cmd /c "$vcvarsCmd >nul 2>&1 && set"
+    foreach ($line in $envLines) {
+        if ($line -match '^([^=]+)=(.*)$') {
+            [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
         }
     }
 
-    # Apply to process environment
-    $env:PATH = ($pathDirs -join ";") + ";$env:PATH"
-    $env:INCLUDE = ($includeDirs -join ";") + $(if ($env:INCLUDE) { ";$env:INCLUDE" } else { "" })
-    $env:LIB = ($libDirs -join ";") + $(if ($env:LIB) { ";$env:LIB" } else { "" })
-
-    Write-Host "  Added to PATH: $($pathDirs -join '; ')" -ForegroundColor DarkGray
+    # PyTorch 2.9+ requires this when the VC environment is pre-loaded
+    $env:DISTUTILS_USE_SDK = "1"
 
     # Verify cl.exe actually runs
     $clCmd = Get-Command cl.exe -ErrorAction SilentlyContinue
     if (-not $clCmd) {
-        Write-Host "ERROR: cl.exe added to PATH but still not found by PowerShell." -ForegroundColor Red
+        Write-Host "ERROR: cl.exe not found after sourcing vcvarsall.bat." -ForegroundColor Red
         throw "MSVC (cl.exe) is required. Run from an 'x64 Native Tools Command Prompt for VS 2022'."
     }
     Write-Host "  cl.exe on PATH: $($clCmd.Path)" -ForegroundColor DarkGray
+    Write-Host "  INCLUDE: $($env:INCLUDE.Split(';').Count) entries" -ForegroundColor DarkGray
 
-    # Smoke test — actually invoke cl.exe
-    try {
-        $clOutput = & $clCmd.Path 2>&1 | Select-Object -First 1
+    # Smoke test — cl.exe prints its banner to stderr and exits non-zero
+    # when called with no arguments, so we capture both streams.
+    $clOutput = & $clCmd.Path 2>&1 | Select-Object -First 1
+    if ($clOutput -match 'Microsoft.*Compiler') {
         Write-Host "  cl.exe version: $clOutput" -ForegroundColor DarkGray
-    } catch {
-        Write-Host "  WARNING: cl.exe exists but failed to run: $_" -ForegroundColor Yellow
+    } else {
+        Write-Host "  WARNING: cl.exe returned unexpected output: $clOutput" -ForegroundColor Yellow
         Write-Host "  Build may still fail. Consider running from an 'x64 Native Tools Command Prompt'." -ForegroundColor Yellow
     }
 }
