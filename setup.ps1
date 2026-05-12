@@ -126,6 +126,74 @@ function Get-PyTorchWheelIndexUrl {
     throw "Cannot determine PyTorch CUDA wheel index. Set PYTORCH_CUDA_INDEX or provide a valid CUDA_HOME."
 }
 
+function Get-PinnedTorchVersion {
+    # Parse the pinned torch version from pyproject.toml. Falls back to $null on miss.
+    $pp = Join-Path $PSScriptRoot "pyproject.toml"
+    if (-not (Test-Path $pp)) { return $null }
+    $content = Get-Content $pp -Raw
+    # Match e.g. torch==2.9.1 (allow surrounding quotes / spaces).
+    $m = [regex]::Match($content, 'torch\s*==\s*(\d+\.\d+(?:\.\d+)?)')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+function Get-CurrentPythonTag {
+    # Returns the Python ABI tag (e.g. "cp311") for the currently-active interpreter.
+    try {
+        $tag = python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')" 2>$null
+        if ($tag) { return $tag.Trim() }
+    } catch { }
+    return "cp311" # Matches the venv we just created with `uv venv --python 3.11`.
+}
+
+function Resolve-WindowsCompatibleWheelIndexUrl {
+    # On Windows, the auto-detected CUDA toolkit version may not have torch wheels for
+    # win_amd64 (e.g. cu129 + torch 2.9.1 ships only Linux wheels at the time of this
+    # writing). Probe candidate cu indexes in descending order and pick the first one
+    # that actually publishes a Windows wheel for the pinned torch + active Python.
+    param([string]$Url)
+
+    if (-not $Url) { return $Url }
+    $isWin = ($PSVersionTable.PSVersion.Major -ge 6 -and $IsWindows) -or
+             ($PSVersionTable.PSVersion.Major -lt 6 -and $env:OS -match "Windows")
+    if (-not $isWin) { return $Url }
+
+    $m = [regex]::Match($Url, "/whl/cu(\d+)/?$")
+    if (-not $m.Success) { return $Url }
+    $detectedCu = [int]$m.Groups[1].Value
+
+    $torchVer = Get-PinnedTorchVersion
+    $pyTag    = Get-CurrentPythonTag
+    if (-not $torchVer -or -not $pyTag) { return $Url }
+
+    # Candidate cu versions: detected first, then known Windows-shipped releases.
+    $candidates = @($detectedCu, 128, 126, 124, 121, 118) |
+        Sort-Object -Unique -Descending |
+        Where-Object { $_ -le $detectedCu }
+
+    foreach ($cu in $candidates) {
+        $listUrl = "https://download.pytorch.org/whl/cu$cu/torch/"
+        try {
+            $resp = Invoke-WebRequest -Uri $listUrl -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        } catch { continue }
+        $needle = "torch-$torchVer+cu$cu-$pyTag-$pyTag-win_amd64.whl"
+        if ($resp.Content -match [regex]::Escape($needle)) {
+            $picked = "https://download.pytorch.org/whl/cu$cu"
+            if ($cu -ne $detectedCu) {
+                Write-Host "  Adjusted PyTorch wheel index for Windows: cu$detectedCu -> cu$cu (no Windows wheel for torch $torchVer on cu$detectedCu yet)." -ForegroundColor Yellow
+            } else {
+                Write-Host "  Verified Windows wheel: torch $torchVer for $pyTag on cu$cu" -ForegroundColor DarkGray
+            }
+            return $picked
+        }
+    }
+
+    Write-Host "  WARNING: No Windows wheel found for torch $torchVer ($pyTag) on cu$detectedCu or any known fallback (cu128/126/124/121/118)." -ForegroundColor Yellow
+    Write-Host "           Proceeding with the auto-detected index; the install will likely fail." -ForegroundColor Yellow
+    Write-Host "           Override manually with `$env:PYTORCH_CUDA_INDEX = 'cuXYZ' and re-run." -ForegroundColor Yellow
+    return $Url
+}
+
 function Ensure-VsBuildEnvironment {
     # Check if cl.exe is truly on the system PATH (not just a PowerShell alias/module).
     # where.exe searches the real PATH that child processes inherit.
@@ -225,15 +293,48 @@ if (-not $uvCmd) {
 }
 
 Write-Host "[1/5] Creating virtual environment (.venv, Python 3.11)..." -ForegroundColor Green
-uv venv --python 3.11 --prompt nht .venv
+# Use a uv-managed (python-build-standalone) interpreter rather than a system
+# / Anaconda Python. Recent PyTorch Windows wheels (>=2.9) are built with
+# MSVC 19.39+ (VS 2022), and loading their c10.dll / torch_cpu.dll against an
+# older CRT (e.g. Anaconda Python's MSC v.1916 from VS 2017) deterministically
+# fails with WinError 1114 ("DLL initialization routine failed") because the
+# C++ static initialisers can't bind to the older runtime. uv's managed
+# interpreters bundle a matching, modern CRT.
+#
+# --python-preference only-managed forces uv to ignore system Python and
+# either reuse a previously-downloaded managed interpreter or download one.
+# --allow-existing makes this idempotent (re-running reuses the venv without
+# the interactive "replace?" prompt). Delete .venv to force a clean rebuild.
+uv python install 3.11
+
+# If a previous run created .venv with a non-managed (Anaconda / system) Python,
+# rebuild it from scratch. The interpreter path encodes the source, so we can
+# detect this by checking pyvenv.cfg's "home" line.
+$venvCfg = Join-Path $PSScriptRoot ".venv\pyvenv.cfg"
+if (Test-Path $venvCfg) {
+    $homeLine = (Get-Content $venvCfg | Where-Object { $_ -match "^home\s*=" } | Select-Object -First 1)
+    $isManaged = $homeLine -and ($homeLine -match "uv[\\/]python|python-build-standalone")
+    if (-not $isManaged) {
+        Write-Host "  Existing .venv was built from a non-managed Python ($homeLine). Recreating with uv-managed Python to avoid CRT mismatches." -ForegroundColor Yellow
+        Remove-Item -Recurse -Force (Join-Path $PSScriptRoot ".venv")
+    }
+}
+uv venv --python 3.11 --python-preference only-managed --prompt nht --allow-existing .venv
 & .\.venv\Scripts\Activate.ps1
+$pyVerLine = python -c "import sys; print(sys.version)" 2>&1 | Select-Object -First 1
+Write-Host "  venv python: $pyVerLine" -ForegroundColor DarkGray
 
 # Ensure the MSVC build environment is available AFTER venv activation.
 # Activate.ps1 restores _OLD_VIRTUAL_PATH which would undo any PATH changes made before it.
 Ensure-VsBuildEnvironment
 
 Write-Host "[2/5] Initializing gsplat submodule..." -ForegroundColor Green
-git submodule update --init --recursive --remote
+# Initialize / sync to the SHA pinned in the parent repo's index. Do NOT use
+# --remote: that would silently fast-forward (or detach) the submodule to
+# whatever the configured branch in .gitmodules currently points to upstream,
+# which can clobber local rebase work. The parent repo is the source of truth
+# for which gsplat commit goes with which NHT commit.
+git submodule update --init --recursive
 
 Write-Host "[3a/5] CUDA + PyTorch (CUDA wheels)..." -ForegroundColor Green
 $cudaOk = Set-CudaHomeFromToolkit
@@ -246,6 +347,7 @@ if (-not $cudaOk) {
 Write-Host "  Found CUDA toolkit at $env:CUDA_HOME" -ForegroundColor DarkGray
 
 $wheelUrl = Get-PyTorchWheelIndexUrl
+$wheelUrl = Resolve-WindowsCompatibleWheelIndexUrl -Url $wheelUrl
 Write-Host "  PyTorch wheel index: $wheelUrl" -ForegroundColor DarkGray
 $env:UV_INDEX="pytorch=$wheelUrl"
 
@@ -295,6 +397,11 @@ if ($clCheck) {
 
 # Install dependencies
 Write-Host "[4/5] Installing gsplat..." -ForegroundColor Green
+# Defensive: --no-build-isolation reuses the active venv's interpreter for the build
+# backend, so setuptools / wheel / ninja must already be installed there. They are
+# listed in the nht pyproject.toml above, but ensure them here so a partial step [3b]
+# doesn't cascade into opaque "ModuleNotFoundError: setuptools" build failures.
+uv pip install setuptools wheel ninja
 uv pip install --no-build-isolation -e ./gsplat
 
 Write-Host "[5/5] Installing example dependencies..." -ForegroundColor Green
