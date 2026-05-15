@@ -354,35 +354,61 @@ $env:UV_INDEX="pytorch=$wheelUrl"
 Write-Host "[3b/5] Installing pytorch and 'nht' package (AOV helpers)..." -ForegroundColor Green
 uv pip install -e .
 
-# Setup TORCH_CUDA_ARCH_LIST and TCNN_CUDA_ARCHITECTURES properly based on the installed PyTorch's supported CUDA architectures, with a 
-# minimum of 7.0 (Ampere) to avoid long compile times for older unsupported architectures. Having a minimum capability is to avoid the 
-# following compilation issue:
+# Setup TORCH_CUDA_ARCH_LIST and TCNN_CUDA_ARCHITECTURES from the locally-installed
+# GPU(s) only. Building for every arch torch's wheel supports (sm_70..sm_120) is
+# wasteful for an editable / single-machine install and, on Windows + CUDA 12.9,
+# fatal: sm_100 / sm_120 pull in cluster-launch headers that hit the known
+# `asm operand type size(4) does not match constraint 'l'` bug in
+# `cuda/__ptx/instructions/generated/clusterlaunchcontrol.h` (long is 32-bit on
+# Windows but the asm constraint expects 64-bit). PTX is appended so the build
+# still runs on a slightly newer GPU if the binary is later moved.
 #
-# error: namespace "cooperative_groups" has no member "labeled_partition"
-# DEBUG       auto warp_group_g = cg::labeled_partition(warp, gid);
-# DEBUG                               ^
-# DEBUG  
+# A minimum of compute 7.0 (Volta) avoids:
+#   error: namespace "cooperative_groups" has no member "labeled_partition"
+# on the cg::labeled_partition path. See
+# https://github.com/nerfstudio-project/gsplat/issues/653.
 #
-# See: https://forums.developer.nvidia.com/t/cuda-11-4-cooperative-groups-no-longer-supported-on-sm-7-0/194001
-# See: https://github.com/nerfstudio-project/gsplat/issues/653
-#
-# Add PTX to TORCH_CUDA_ARCH_LIST to allow JIT compilation for newer architectures not in the list. Tiny-CUDA-NN always generate PTX for 
-# each specified architecture, so we don't need to add +PTX to TCNN_CUDA_ARCHITECTURES.
+# Override $env:TORCH_CUDA_ARCH_LIST / $env:TCNN_CUDA_ARCHITECTURES before running
+# this script to force a wider build matrix (e.g. for CI that targets multiple
+# GPUs).
 $minCudaArch = 70
 
-$torchCudaArchList = uv run python -c "import torch,re; min_arch = $minCudaArch; archs = set(); [archs.add(m.group(1)+'.'+m.group(2)+m.group(3)) for s in torch.cuda.get_arch_list() for m in [re.match(r'sm_(\d+)(\d)([a-z]?)$', s)] if m and int(m.group(1)+m.group(2)) >= min_arch]; [archs.add(f'{cc//10}.{cc%10}') for i in range(torch.cuda.device_count()) if (cc:=torch.cuda.get_device_capability(i)[0]*10+torch.cuda.get_device_capability(i)[1]) >= min_arch]; print(';'.join(sorted(archs)))"
-if (-not $torchCudaArchList) {
-    Write-Host "  WARNING: No CUDA architecture list found for torch. Using default: 9.0" -ForegroundColor Yellow
-    $torchCudaArchList = "9.0"
-}
-$env:TORCH_CUDA_ARCH_LIST = $torchCudaArchList + "+PTX"
+$archDetectScript = @"
+import torch
+min_arch = $minCudaArch
+caps = set()
+for i in range(torch.cuda.device_count()):
+    maj, minr = torch.cuda.get_device_capability(i)
+    cc = maj * 10 + minr
+    if cc >= min_arch:
+        caps.add((maj, minr))
+print(';'.join(f'{m}.{n}' for m, n in sorted(caps)))
+"@
 
-$tcnnCudaArchList = uv run python -c "import torch,re; min_arch = $minCudaArch; archs = set(); [archs.add(m.group(1)+m.group(2)+m.group(3)) for s in torch.cuda.get_arch_list() for m in [re.match(r'sm_(\d+)(\d)([a-z]?)$', s)] if m and int(m.group(1)+m.group(2)) >= min_arch]; [archs.add(str(cc)) for i in range(torch.cuda.device_count()) if (cc:=torch.cuda.get_device_capability(i)[0]*10+torch.cuda.get_device_capability(i)[1]) >= min_arch]; print(';'.join(sorted(archs)))"
-if (-not $tcnnCudaArchList) {
-    Write-Host "  WARNING: No CUDA architecture list found for tcnn. Using default: 90" -ForegroundColor Yellow
-    $tcnnCudaArchList = "90"
+# Allow CI / power users to override via a dedicated env var. The script always
+# recomputes TORCH_CUDA_ARCH_LIST / TCNN_CUDA_ARCHITECTURES on every invocation,
+# so stale wide values left over from earlier runs in the same shell don't keep
+# blowing up the build.
+if ($env:NHT_TORCH_CUDA_ARCH_LIST) {
+    $env:TORCH_CUDA_ARCH_LIST = $env:NHT_TORCH_CUDA_ARCH_LIST
+    Write-Host "  TORCH_CUDA_ARCH_LIST: $($env:TORCH_CUDA_ARCH_LIST) (from NHT_TORCH_CUDA_ARCH_LIST)" -ForegroundColor DarkGray
+} else {
+    $localArchs = uv run python -c $archDetectScript
+    if ($localArchs) {
+        $env:TORCH_CUDA_ARCH_LIST = $localArchs + "+PTX"
+    } else {
+        Write-Host "  WARNING: No CUDA-capable GPU detected. Defaulting to TORCH_CUDA_ARCH_LIST=8.9+PTX (RTX 40-series)." -ForegroundColor Yellow
+        Write-Host "           Override with `$env:NHT_TORCH_CUDA_ARCH_LIST='X.Y;...' if your target differs." -ForegroundColor Yellow
+        $env:TORCH_CUDA_ARCH_LIST = "8.9+PTX"
+    }
+    Write-Host "  TORCH_CUDA_ARCH_LIST: $($env:TORCH_CUDA_ARCH_LIST)" -ForegroundColor DarkGray
 }
-$env:TCNN_CUDA_ARCHITECTURES = $tcnnCudaArchList
+
+# tiny-cuda-nn expects integer-encoded archs (e.g. "89" for sm_89) and always
+# emits PTX, so no +PTX suffix here.
+$tcnnArchs = ($env:TORCH_CUDA_ARCH_LIST -replace '\+PTX$','').Split(';') |
+    ForEach-Object { ($_ -replace '\.','') }
+$env:TCNN_CUDA_ARCHITECTURES = ($tcnnArchs -join ';')
 Write-Host "  TCNN_CUDA_ARCHITECTURES: $($env:TCNN_CUDA_ARCHITECTURES)" -ForegroundColor DarkGray
 
 # Verify cl.exe is visible to child processes before compiling
