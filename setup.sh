@@ -91,10 +91,10 @@ export CC="$(which gcc)"
 export CXX="$(which g++)"
 
 echo "[2/5] Initializing gsplat submodule..."
-if ! git submodule update --init --remote; then
-  echo "WARNING: --remote fetch failed; falling back to pinned submodule commit." >&2
-  git submodule update --init
-fi
+# if ! git submodule update --init --remote; then
+#   echo "WARNING: --remote fetch failed; falling back to pinned submodule commit." >&2
+#   git submodule update --init
+# fi
 git submodule foreach git submodule update --init --recursive
 
 echo "[3a/5] CUDA + PyTorch (CUDA wheels)..."
@@ -111,7 +111,7 @@ echo "[3b/5] Installing pytorch and 'nht' package (AOV helpers)..."
 uv pip install -e .
 
 # Determine CUDA architectures from local PyTorch installation and set env vars for building torch extensions.
-local_torch_cuda_arch_list=$(uv run python -c "import torch,re; archs = set(); [archs.add(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+'.'+m[2]+m[3],s)) for s in torch.cuda.get_arch_list() if s.startswith('sm_')]; [archs.add(f'{cc//10}.{cc%10}') for i in range(torch.cuda.device_count()) if (cc:=torch.cuda.get_device_capability(i)[0]*10+torch.cuda.get_device_capability(i)[1])]; print(';'.join(sorted(archs)))")
+local_torch_cuda_arch_list=$(python -c 'import re,torch; a={f"{c//10}.{c%10}{m[3]}" for s in torch.cuda.get_arch_list() if (m:=re.match(r"sm_(\d+)(\d)([a-z]?)$",s)) and (c:=int(m[1]+m[2]))>=80}; a|={f"{M}.{n}" for i in range(torch.cuda.device_count()) for (M,n) in [torch.cuda.get_device_capability(i)] if M*10+n>=80}; print(";".join(sorted(a)))')
 if [ -z "${local_torch_cuda_arch_list}" ]; then
   echo "WARNING: No CUDA architecture list found for torch. Using default: 9.0"
   local_torch_cuda_arch_list="9.0"
@@ -119,7 +119,7 @@ fi
 export TORCH_CUDA_ARCH_LIST="${local_torch_cuda_arch_list}+PTX"
 echo "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}"
 
-local_tcnn_cuda_arch_list=$(uv run python -c "import torch,re; archs = set(); [archs.add(re.sub(r'sm_(\d+)(\d)([a-z]?)$',lambda m:m[1]+m[2]+m[3],s)) for s in torch.cuda.get_arch_list() if s.startswith('sm_')]; [archs.add(str(cc)) for i in range(torch.cuda.device_count()) if (cc:=torch.cuda.get_device_capability(i)[0]*10+torch.cuda.get_device_capability(i)[1])]; print(';'.join(sorted(archs)))")
+local_tcnn_cuda_arch_list=$(python -c 'import re,torch; a={f"{c}{m[3]}" for s in torch.cuda.get_arch_list() if (m:=re.match(r"sm_(\d+)(\d)([a-z]?)$",s)) and (c:=int(m[1]+m[2]))>=80}; a|={str(M*10+n) for i in range(torch.cuda.device_count()) for (M,n) in [torch.cuda.get_device_capability(i)] if M*10+n>=80}; print(";".join(sorted(a)))')
 if [ -z "${local_tcnn_cuda_arch_list}" ]; then
   echo "WARNING: No CUDA architecture list found for tcnn. Using default: 90"
   local_tcnn_cuda_arch_list="90"
@@ -128,7 +128,7 @@ export TCNN_CUDA_ARCHITECTURES="${local_tcnn_cuda_arch_list}"
 echo "TCNN_CUDA_ARCHITECTURES: ${TCNN_CUDA_ARCHITECTURES}"
 
 echo "[4/5] Installing gsplat..."
-uv pip install --no-build-isolation -e ./gsplat
+uv pip install --no-build-isolation -e ./gsplat[nht]
 
 echo "[5/5] Installing example dependencies..."
 uv pip install --no-build-isolation --reinstall-package tinycudann -r gsplat/examples/requirements.txt

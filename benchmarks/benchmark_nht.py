@@ -15,17 +15,37 @@
 
 """NHT Rendering Benchmark.
 
-Measures per-component execution time of the NHT rendering pipeline
-using CUDA events for accurate GPU timing.
+Measures execution time of the NHT rendering pipeline using CUDA events
+for accurate GPU timing.
 
-Each scene is benchmarked in an isolated subprocess.  Rasterization and
-MLP are timed in SEPARATE passes to avoid GPU power-state coupling
-(a heavy rasterization kernel draws enough power to throttle GPU clocks,
-making the immediately-following MLP appear slower than it really is).
+Two render backends are supported:
 
-Usage (single scene):
+* ``--fused`` (default): the production inference path
+  (``gsplat.nht.NHTInferenceRenderer``) — projection + tile intersection +
+  one fully-fused kernel that does rasterization + harmonic encoding +
+  inline WMMA MLP + sigmoid in a single launch.  Reported as one end-to-end
+  ``total`` (the fused kernel is monolithic, so the rasterization/MLP split
+  does not apply).
+* ``--no_fused``: the unfused diagnostic path — ``rasterization()`` to a
+  feature buffer followed by a SEPARATE ``DeferredShaderModule`` (tcnn) MLP.
+  Rasterization and MLP are timed in separate passes to avoid GPU
+  power-state coupling (a heavy rasterization kernel draws enough power to
+  throttle GPU clocks, making the immediately-following MLP appear slower
+  than it really is).
+
+If ``--fused`` is requested but the shader config has no compiled fused
+kernel (see ``nht_fused_supported``), the benchmark prints the reason and
+falls back to the unfused path.
+
+Each scene is benchmarked in an isolated subprocess.
+
+Usage (single scene, fused backend):
     python benchmark_nht.py --ckpt results/garden/ckpts/ckpt_29999_rank0.pt \
         --data_dir data/360_v2/garden --data_factor 4
+
+Usage (single scene, unfused breakdown):
+    python benchmark_nht.py --ckpt results/garden/ckpts/ckpt_29999_rank0.pt \
+        --data_dir data/360_v2/garden --data_factor 4 --no_fused
 
 Usage (all scenes under a results folder):
     python benchmark_nht.py --results_dir results/nht_mcmc \
@@ -132,6 +152,7 @@ def aggregate_timing(all_results, scene_list):
         row["fps_raster_mlp"] = 1000.0 / rml if rml > 0 else 0
         avg_gs = sum(all_results[s].get("num_gs", 0) for s in scenes) / len(scenes)
         row["avg_num_gs"] = int(avg_gs)
+        row["fused"] = all(all_results[s].get("fused") for s in scenes)
         return row
 
     rows = []
@@ -154,7 +175,13 @@ def print_scene_results(name, d):
     w, h = d.get("width", 0), d.get("height", 0)
     n_img = d.get("num_images", 0)
 
-    print(f"\n  {name} ({num_gs} GS, {w}x{h}, {n_img} imgs)")
+    backend = "fused" if d.get("fused") else "unfused"
+    print(f"\n  {name} ({num_gs} GS, {w}x{h}, {n_img} imgs) [{backend}]")
+    if d.get("fused"):
+        # The fused kernel is monolithic: rasterization + MLP cannot be split.
+        fps = 1000.0 / total if total > 0 else 0
+        print(f"    {'fused render (raster+MLP)':23s}: {total:8.2f} ms  ({fps:.1f} FPS)")
+        return
     for label, val in [("rasterization", raster), ("deferred_mlp", mlp)]:
         pct = val / total * 100 if total > 0 else 0
         print(f"    {label:23s}: {val:8.2f} ms  ({pct:5.1f}%)")
@@ -165,8 +192,12 @@ def print_scene_results(name, d):
 
 
 def print_aggregation_table(rows):
+    any_fused = any(r.get("fused") for r in rows)
     print(f"\n{'='*80}")
     print(f"  Aggregated Timing Results")
+    if any_fused:
+        print(f"  (fused rows: full fused kernel reported under Raster(ms); "
+              f"MLP(ms)=0, Overhead(ms)=0)")
     print(f"{'='*80}")
     hdr = (f"  {'Split':<10} {'N':>3}  {'Raster(ms)':>11}  {'MLP(ms)':>9}  "
            f"{'Over(ms)':>9}  {'Total(ms)':>10}  {'FPS':>7}  {'FPS(R+M)':>9}  {'Avg #GS':>10}")
@@ -203,9 +234,14 @@ def save_summary_json(results_dir, all_results, rows):
 # ---------------------------------------------------------------------------
 
 def _run_scene_benchmark(args):
-    from collections import defaultdict
     import torch
     from gsplat.nht.deferred_shader import DeferredShaderModule
+    from gsplat.nht import (
+        NHTInferenceConfig,
+        NHTInferenceRenderer,
+        NHTParams,
+        nht_fused_supported,
+    )
     from gsplat.rendering import rasterization
 
     def _t(x):
@@ -303,96 +339,185 @@ def _run_scene_benchmark(args):
             packed=False, absgrad=False,
             rasterize_mode="antialiased", render_mode="RGB",
             camera_model="pinhole",
-            with_ut=True, with_eval3d=True, nht=True,
-            center_ray_mode=dm.center_ray_encoding,
-            ray_dir_scale=dm.ray_dir_scale,
+            with_ut=True, with_eval3d=True,
+            nht_params=NHTParams(
+                center_ray_mode=dm.center_ray_encoding,
+                ray_dir_scale=dm.ray_dir_scale,
+            ),
         )
 
     # ------------------------------------------------------------------
-    # JIT warmup: run a few full frames so tcnn compiles its kernels.
+    # Backend selection: fused single-kernel inference vs. unfused
+    # (rasterization + a separate tcnn MLP).
     # ------------------------------------------------------------------
+    use_fused = bool(args.fused)
+    fused_renderer = None
+    fused_splats = None
+    if use_fused:
+        ok, reason = nht_fused_supported(dm, for_training=False)
+        if not ok:
+            print(f"  Fused backend unavailable: {reason}")
+            print(f"  -> falling back to the unfused path.")
+            use_fused = False
+    if use_fused:
+        fused_renderer = NHTInferenceRenderer(
+            dm,
+            NHTInferenceConfig(
+                tile_size=16,
+                center_ray_mode=dm.center_ray_encoding,
+            ),
+        )
+        # NHTInferenceRenderer applies the activations (normalize/exp/sigmoid)
+        # itself, so it must receive the RAW checkpoint parameters.
+        fused_splats = {
+            "means": splats["means"],
+            "quats": splats["quats"],
+            "scales": splats["scales"],
+            "opacities": splats["opacities"],
+            "features": splats["features"],
+        }
+
+    def _fused_render(K, vm):
+        # render() takes an unbatched [4, 4] viewmat and [3, 3] K.
+        return fused_renderer.render(fused_splats, vm[0], K[0], width, height)
+
     warmup_frames = min(args.warmup_frames, n_val * 2)
-    print(f"  JIT warmup ({warmup_frames} frames) ...")
-    with torch.no_grad():
-        for j in range(warmup_frames):
-            K, vm = _prepare(j % n_val)
-            rc, ra, info = _rasterize(K, vm)
-            dm(rc)
-    torch.cuda.synchronize()
 
     # ------------------------------------------------------------------
-    # Phase 1: Rasterization-only timing
+    # JIT warmup: run a few full frames so the (fused or tcnn) kernels
+    # compile before timing.
     # ------------------------------------------------------------------
-    raster_accum = 0.0
-    raster_count = 0
-    print(f"  Timing rasterization ({args.num_passes} passes x {n_val} imgs) ...")
-    with torch.no_grad():
-        for _ in range(args.num_passes):
-            for i in range(n_val):
-                K, vm = _prepare(i)
-                torch.cuda.synchronize()
-                s = torch.cuda.Event(enable_timing=True)
-                e = torch.cuda.Event(enable_timing=True)
-                s.record()
-                _rasterize(K, vm)
-                e.record()
-                torch.cuda.synchronize()
-                raster_accum += s.elapsed_time(e)
-                raster_count += 1
-
-    # ------------------------------------------------------------------
-    # Phase 2: MLP-only timing
-    # Pre-compute ONE rasterization output, then time MLP repeatedly.
-    # The MLP kernel processes (H*W, F) — same cost regardless of which
-    # camera produced the features.
-    # ------------------------------------------------------------------
-    with torch.no_grad():
-        K0, vm0 = _prepare(0)
-        rc_ref, _, _ = _rasterize(K0, vm0)
-    torch.cuda.synchronize()
-
-    mlp_accum = 0.0
-    mlp_count = 0
-    mlp_iters = args.num_passes * n_val
-    print(f"  Timing MLP ({mlp_iters} iterations) ...")
-    with torch.no_grad():
-        for _ in range(mlp_iters):
-            torch.cuda.synchronize()
-            s = torch.cuda.Event(enable_timing=True)
-            e = torch.cuda.Event(enable_timing=True)
-            s.record()
-            dm(rc_ref)
-            e.record()
-            torch.cuda.synchronize()
-            mlp_accum += s.elapsed_time(e)
-            mlp_count += 1
-
-    # ------------------------------------------------------------------
-    # Phase 3: End-to-end timing (raster + MLP back-to-back, as in
-    # real rendering).
-    # ------------------------------------------------------------------
-    total_accum = 0.0
-    total_count = 0
-    print(f"  Timing end-to-end ({args.num_passes} passes x {n_val} imgs) ...")
-    with torch.no_grad():
-        for _ in range(args.num_passes):
-            for i in range(n_val):
-                K, vm = _prepare(i)
-                torch.cuda.synchronize()
-                s = torch.cuda.Event(enable_timing=True)
-                e = torch.cuda.Event(enable_timing=True)
-                s.record()
+    backend = "fused" if use_fused else "unfused"
+    print(f"  JIT warmup ({warmup_frames} frames, {backend}) ...")
+    try:
+        with torch.no_grad():
+            for j in range(warmup_frames):
+                K, vm = _prepare(j % n_val)
+                if use_fused:
+                    _fused_render(K, vm)
+                else:
+                    rc, ra, info = _rasterize(K, vm)
+                    dm(rc)
+        torch.cuda.synchronize()
+    except Exception as ex:  # noqa: BLE001 - fall back if fused op is missing
+        if not use_fused:
+            raise
+        print(f"  Fused warmup failed ({type(ex).__name__}: {ex})")
+        print(f"  -> falling back to the unfused path.")
+        use_fused = False
+        fused_renderer = None
+        with torch.no_grad():
+            for j in range(warmup_frames):
+                K, vm = _prepare(j % n_val)
                 rc, ra, info = _rasterize(K, vm)
                 dm(rc)
+        torch.cuda.synchronize()
+
+    if use_fused:
+        # --------------------------------------------------------------
+        # Fused path: time the end-to-end production render (projection +
+        # tile intersection + the single fused rasterize/encode/MLP/sigmoid
+        # kernel). The kernel is monolithic, so there is no raster/MLP
+        # split to report.
+        # --------------------------------------------------------------
+        total_accum = 0.0
+        total_count = 0
+        print(f"  Timing fused render ({args.num_passes} passes x {n_val} imgs) ...")
+        with torch.no_grad():
+            for _ in range(args.num_passes):
+                for i in range(n_val):
+                    K, vm = _prepare(i)
+                    torch.cuda.synchronize()
+                    s = torch.cuda.Event(enable_timing=True)
+                    e = torch.cuda.Event(enable_timing=True)
+                    s.record()
+                    _fused_render(K, vm)
+                    e.record()
+                    torch.cuda.synchronize()
+                    total_accum += s.elapsed_time(e)
+                    total_count += 1
+
+        avg_total = total_accum / total_count if total_count else 0
+        # Attribute the whole fused kernel to "rasterization" (it subsumes
+        # the MLP) and keep deferred_mlp at 0, so the shared aggregation /
+        # markdown output stays consistent (overhead == 0).
+        avg_raster = avg_total
+        avg_mlp = 0.0
+        num_timed = total_count
+    else:
+        # --------------------------------------------------------------
+        # Phase 1: Rasterization-only timing
+        # --------------------------------------------------------------
+        raster_accum = 0.0
+        raster_count = 0
+        print(f"  Timing rasterization ({args.num_passes} passes x {n_val} imgs) ...")
+        with torch.no_grad():
+            for _ in range(args.num_passes):
+                for i in range(n_val):
+                    K, vm = _prepare(i)
+                    torch.cuda.synchronize()
+                    s = torch.cuda.Event(enable_timing=True)
+                    e = torch.cuda.Event(enable_timing=True)
+                    s.record()
+                    _rasterize(K, vm)
+                    e.record()
+                    torch.cuda.synchronize()
+                    raster_accum += s.elapsed_time(e)
+                    raster_count += 1
+
+        # --------------------------------------------------------------
+        # Phase 2: MLP-only timing
+        # Pre-compute ONE rasterization output, then time MLP repeatedly.
+        # The MLP kernel processes (H*W, F) — same cost regardless of which
+        # camera produced the features.
+        # --------------------------------------------------------------
+        with torch.no_grad():
+            K0, vm0 = _prepare(0)
+            rc_ref, _, _ = _rasterize(K0, vm0)
+        torch.cuda.synchronize()
+
+        mlp_accum = 0.0
+        mlp_count = 0
+        mlp_iters = args.num_passes * n_val
+        print(f"  Timing MLP ({mlp_iters} iterations) ...")
+        with torch.no_grad():
+            for _ in range(mlp_iters):
+                torch.cuda.synchronize()
+                s = torch.cuda.Event(enable_timing=True)
+                e = torch.cuda.Event(enable_timing=True)
+                s.record()
+                dm(rc_ref)
                 e.record()
                 torch.cuda.synchronize()
-                total_accum += s.elapsed_time(e)
-                total_count += 1
+                mlp_accum += s.elapsed_time(e)
+                mlp_count += 1
 
-    avg_raster = raster_accum / raster_count if raster_count else 0
-    avg_mlp = mlp_accum / mlp_count if mlp_count else 0
-    avg_total = total_accum / total_count if total_count else 0
-    num_timed = total_count
+        # --------------------------------------------------------------
+        # Phase 3: End-to-end timing (raster + MLP back-to-back, as in
+        # real rendering).
+        # --------------------------------------------------------------
+        total_accum = 0.0
+        total_count = 0
+        print(f"  Timing end-to-end ({args.num_passes} passes x {n_val} imgs) ...")
+        with torch.no_grad():
+            for _ in range(args.num_passes):
+                for i in range(n_val):
+                    K, vm = _prepare(i)
+                    torch.cuda.synchronize()
+                    s = torch.cuda.Event(enable_timing=True)
+                    e = torch.cuda.Event(enable_timing=True)
+                    s.record()
+                    rc, ra, info = _rasterize(K, vm)
+                    dm(rc)
+                    e.record()
+                    torch.cuda.synchronize()
+                    total_accum += s.elapsed_time(e)
+                    total_count += 1
+
+        avg_raster = raster_accum / raster_count if raster_count else 0
+        avg_mlp = mlp_accum / mlp_count if mlp_count else 0
+        avg_total = total_accum / total_count if total_count else 0
+        num_timed = total_count
 
     result = OrderedDict([
         ("scene", args.scene_name or os.path.basename(args.data_dir)),
@@ -400,6 +525,7 @@ def _run_scene_benchmark(args):
         ("width", width),
         ("height", height),
         ("num_images", num_timed),
+        ("fused", use_fused),
         ("rasterization_ms", avg_raster),
         ("deferred_mlp_ms", avg_mlp),
         ("total_ms", avg_total),
@@ -459,6 +585,7 @@ def _run_batch(args):
     print(f"{'='*80}")
     print(f"  NHT Timing Benchmark -- {len(scene_list)} scenes (subprocess isolation)")
     print(f"  {args.num_passes} timed passes, {args.warmup_frames} warmup frames")
+    print(f"  Backend: {'fused (NHTInferenceRenderer)' if args.fused else 'unfused (rasterization + tcnn MLP)'}")
     print(f"  Source: {args.results_dir}")
     print(f"{'='*80}")
 
@@ -497,6 +624,7 @@ def _run_batch(args):
             "--warmup_frames", str(args.warmup_frames),
             "--scene_name", scene,
             "--save_json", json_path,
+            "--fused" if args.fused else "--no_fused",
         ]
 
         env = os.environ.copy()
@@ -576,6 +704,14 @@ def main():
     p.add_argument("--num_passes", type=int, default=3)
     p.add_argument("--warmup_frames", type=int, default=10,
                     help="Frames of full pipeline to run for JIT warmup (default 10)")
+
+    p.add_argument("--fused", dest="fused", action="store_true", default=True,
+                    help="Use the fully-fused NHT inference kernel "
+                         "(NHTInferenceRenderer). This is the default and the "
+                         "real production inference path.")
+    p.add_argument("--no_fused", dest="fused", action="store_false",
+                    help="Use the unfused path (rasterization + a separate "
+                         "tcnn MLP) and report the per-component breakdown.")
 
     p.add_argument("--feature_dim", type=int, default=0)
     p.add_argument("--enable_view_encoding", action="store_true", default=True)
