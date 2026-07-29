@@ -34,6 +34,7 @@ import torch.nn.functional as F
 import viser
 
 from gsplat.distributed import cli
+from gsplat.nht import cast_state_dict_to_fp32
 from gsplat.rendering import rasterization
 from aov.deferred_shader import DeferredShaderAOVModule
 
@@ -165,7 +166,10 @@ def main(local_rank: int, world_rank, world_size: int, args):
     quats = torch.cat(ckpt_quats, dim=0)
     scales = torch.cat(ckpt_scales, dim=0)
     opacities = torch.cat(ckpt_opacities, dim=0)
-    features = torch.cat(ckpt_features, dim=0)
+    # Pre-cast features to fp16 — the NHT rasterizer always casts to half
+    # internally, so doing it once here avoids the per-call conversion.
+    # ``.half()`` is a no-op when the checkpoint already stores them in fp16.
+    features = torch.cat(ckpt_features, dim=0).half()
 
     feature_dim = features.shape[-1]
     print(f"Number of Gaussians: {len(means)}, Feature dim: {feature_dim}")
@@ -199,7 +203,9 @@ def main(local_rank: int, world_rank, world_size: int, args):
         dinov3_feature_dim=dinov3_feature_dim,
         rgb2x_channels=rgb2x_channels,
     ).to(device)
-    deferred_module.load_state_dict(deferred_state_dict)
+    # Upcast any fp16-stored backbone weights to fp32 to match the module's
+    # master-weight dtype before loading.
+    deferred_module.load_state_dict(cast_state_dict_to_fp32(deferred_state_dict))
     deferred_module.eval()
 
     # PCA visualizers (lazily fitted on first render)

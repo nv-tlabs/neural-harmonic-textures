@@ -199,11 +199,22 @@ function Ensure-VsBuildEnvironment {
     # where.exe searches the real PATH that child processes inherit.
     $whereResult = $null
     try { $whereResult = (& where.exe cl.exe 2>&1) | Where-Object { $_ -is [string] -and (Test-Path $_) } | Select-Object -First 1 } catch {}
+    $unsupportedVsPattern = '\\Microsoft Visual Studio\\18\\'
+    $hasUnsupportedVsEnv = (($whereResult -and $whereResult -match $unsupportedVsPattern) -or
+                            ($env:INCLUDE -and $env:INCLUDE -match $unsupportedVsPattern) -or
+                            ($env:LIB -and $env:LIB -match $unsupportedVsPattern) -or
+                            ($env:LIBPATH -and $env:LIBPATH -match $unsupportedVsPattern) -or
+                            ($env:PATH -and $env:PATH -match $unsupportedVsPattern))
     if ($whereResult -and $env:INCLUDE) {
-        Write-Host "  cl.exe already on PATH: $whereResult" -ForegroundColor DarkGray
-        Write-Host "  INCLUDE already set ($($env:INCLUDE.Split(';').Count) entries)" -ForegroundColor DarkGray
-        $env:DISTUTILS_USE_SDK = "1"
-        return
+        if ($hasUnsupportedVsEnv) {
+            Write-Host "  WARNING: A Visual Studio 18 build environment is active, which CUDA 12.x nvcc does not support yet." -ForegroundColor Yellow
+            Write-Host "           Switching to a Visual Studio 2022 toolchain if available." -ForegroundColor Yellow
+        } else {
+            Write-Host "  cl.exe already on PATH: $whereResult" -ForegroundColor DarkGray
+            Write-Host "  INCLUDE already set ($($env:INCLUDE.Split(';').Count) entries)" -ForegroundColor DarkGray
+            $env:DISTUTILS_USE_SDK = "1"
+            return
+        }
     }
 
     Write-Host "  MSVC compiler (cl.exe) not found on system PATH (or INCLUDE not set). Setting up VS build environment..." -ForegroundColor Yellow
@@ -212,7 +223,12 @@ function Ensure-VsBuildEnvironment {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $vsPath = $null
     if (Test-Path $vswhere) {
-        $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        # CUDA 12.x supports the VS 2022 toolset, but VS 18/Build Tools 2026 can
+        # make cudafe++ crash with ACCESS_VIOLATION during CUDA extension builds.
+        $vsPath = & $vswhere -latest -version "[17.0,18.0)" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        if (-not $vsPath) {
+            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        }
     }
     if (-not $vsPath) {
         foreach ($root in @("$env:ProgramFiles\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")) {
@@ -228,6 +244,29 @@ function Ensure-VsBuildEnvironment {
         throw "MSVC (cl.exe) is required to build CUDA extensions. See README for details."
     }
     Write-Host "  Found VS at: $vsPath" -ForegroundColor DarkGray
+
+    if ($hasUnsupportedVsEnv) {
+        Write-Host "  Clearing inherited Visual Studio 18 compiler environment..." -ForegroundColor DarkGray
+        $varsToClear = @(
+            "INCLUDE", "LIB", "LIBPATH",
+            "DevEnvDir", "ExtensionSdkDir",
+            "Framework40Version", "FrameworkDir", "FrameworkDir64",
+            "FrameworkVersion", "FrameworkVersion64",
+            "UCRTVersion", "UniversalCRTSdkDir",
+            "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsRedistDir", "VCToolsVersion",
+            "VisualStudioVersion", "VSINSTALLDIR",
+            "VSCMD_ARG_app_plat", "VSCMD_ARG_HOST_ARCH", "VSCMD_ARG_TGT_ARCH", "VSCMD_VER",
+            "WindowsLibPath", "WindowsSdkBinPath", "WindowsSdkDir",
+            "WindowsSDKLibVersion", "WindowsSdkVerBinPath", "WindowsSDKVersion"
+        )
+        foreach ($varName in $varsToClear) {
+            [System.Environment]::SetEnvironmentVariable($varName, $null, 'Process')
+        }
+        if ($env:PATH) {
+            $env:PATH = (($env:PATH -split ';') |
+                Where-Object { $_ -and ($_ -notmatch $unsupportedVsPattern) }) -join ';'
+        }
+    }
 
     # Use vcvarsall.bat to properly set up the full MSVC environment.
     # This is the only reliable way to get PATH, INCLUDE, LIB, and all
@@ -329,9 +368,16 @@ Write-Host "  venv python: $pyVerLine" -ForegroundColor DarkGray
 Ensure-VsBuildEnvironment
 
 Write-Host "[2/5] Initializing gsplat submodule..." -ForegroundColor Green
-# Initialize / sync to the SHA pinned in the parent repo's index. Do NOT use
+# NHT builds against the gsplat fork at https://github.com/Arcanous98/gsplat
+$gsplatUrl = (git config -f .gitmodules --get submodule.gsplat.url)
+$gsplatBranch = (git config -f .gitmodules --get submodule.gsplat.branch)
+if (-not $gsplatBranch) { $gsplatBranch = "HEAD" }
+Write-Host "  gsplat source: $gsplatUrl (branch $gsplatBranch)" -ForegroundColor DarkGray
+git submodule sync --recursive
+
+# Initialize / check out the SHA pinned in the parent repo's index. Do NOT use
 # --remote: that would silently fast-forward (or detach) the submodule to
-# whatever the configured branch in .gitmodules currently points to upstream,
+# whatever the configured branch in .gitmodules currently points to on the fork,
 # which can clobber local rebase work. The parent repo is the source of truth
 # for which gsplat commit goes with which NHT commit.
 git submodule update --init --recursive
@@ -405,9 +451,12 @@ if ($env:NHT_TORCH_CUDA_ARCH_LIST) {
 }
 
 # tiny-cuda-nn expects integer-encoded archs (e.g. "89" for sm_89) and always
-# emits PTX, so no +PTX suffix here.
+# emits PTX, so no +PTX suffix here. We also strip any alphabetic arch suffix
+# (e.g. "9.0a" -> "90") because tcnn's setup.py runs int() on each entry and
+# crashes on Hopper-variant tokens like "90a". gsplat itself still builds for
+# the full TORCH_CUDA_ARCH_LIST above (which keeps "9.0a").
 $tcnnArchs = ($env:TORCH_CUDA_ARCH_LIST -replace '\+PTX$','').Split(';') |
-    ForEach-Object { ($_ -replace '\.','') }
+    ForEach-Object { (($_ -replace '\.','') -replace '[a-zA-Z]','') }
 $env:TCNN_CUDA_ARCHITECTURES = ($tcnnArchs -join ';')
 Write-Host "  TCNN_CUDA_ARCHITECTURES: $($env:TCNN_CUDA_ARCHITECTURES)" -ForegroundColor DarkGray
 
@@ -422,13 +471,20 @@ if ($clCheck) {
 }
 
 # Install dependencies
-Write-Host "[4/5] Installing gsplat..." -ForegroundColor Green
+Write-Host "[4/5] Installing gsplat (with [nht] extra: tinycudann)..." -ForegroundColor Green
 # Defensive: --no-build-isolation reuses the active venv's interpreter for the build
 # backend, so setuptools / wheel / ninja must already be installed there. They are
 # listed in the nht pyproject.toml above, but ensure them here so a partial step [3b]
 # doesn't cascade into opaque "ModuleNotFoundError: setuptools" build failures.
 uv pip install setuptools wheel ninja
-uv pip install --no-build-isolation -e ./gsplat
+
+# The [nht] extra pulls tinycudann from git, which recursively initialises
+# cutlass. Cutlass's docs tree contains paths longer than Windows' default
+# MAX_PATH (260), so without core.longpaths git fails the submodule checkout
+# with "Filename too long" and pip aborts metadata generation. We enable it
+# globally for the current user before any tcnn-related git submodule init.
+git config --global core.longpaths true
+uv pip install --no-build-isolation -e "./gsplat[nht]"
 
 Write-Host "[5/5] Installing example dependencies..." -ForegroundColor Green
 $examplesReq = Join-Path $PSScriptRoot "gsplat\examples\requirements.txt"

@@ -66,6 +66,11 @@ jobs:
           git config --global --add safe.directory "$(pwd)"
           bash ./setup.sh
 
+      - name: Test gsplat NHT pytest collection
+          source .venv/bin/activate
+          uv pip install pytest
+          pytest gsplat/tests/test_nht.py -v --tb=short -rs
+
   build-windows:
     name: build windows (CUDA ${{ matrix.cuda_version }})
     runs-on: windows-latest
@@ -107,3 +112,10 @@ jobs:
         shell: pwsh
         run: |
           .\setup.ps1
+
+      - name: Test gsplat NHT pytest collection
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\Activate.ps1
+          uv pip install pytest
+          pytest gsplat/tests/test_nht.py -v --tb=short -rs

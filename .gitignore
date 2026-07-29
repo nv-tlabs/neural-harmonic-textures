@@ -30,3 +30,8 @@ gsplat_internal/
 gsplat_oss/
 cluster/
 uv.lock
+NHT_OSS_DELTA_REVIEW.md
+nht_sparse_grad_analysis.md
+# trainer_help.txt
+results_fused/
+results_verified/

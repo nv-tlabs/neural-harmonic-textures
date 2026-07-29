@@ -27,6 +27,30 @@ SPDX-License-Identifier: Apache-2.0
 
 ---
 
+## News
+
+### v1.1 — 2026-07
+
+NHT has been accepted as an Oral at ECCV'26! See you in Malmo.
+
+To celebrate, we have added **fully-fused rasterize+MLP kernels** (now the default).
+
+#### Fully-fused rasterize+MLP kernels
+
+NHT rendering and training now run on new fully-fused CUDA kernels that evaluate the deferred MLP inline in the rasterizer (warp-cooperative WMMA, no intermediate feature-buffer round trip and no separate tcnn launches). The backward is fused too: a single kernel backpropagates dL/dRGB and dL/dalpha to the splat parameters *and* the MLP weights, with per-block weight-gradient accumulation in shared memory.
+
+Measured on an RTX 4090 (garden, 1M primitives, 1920×1080, `feature_dim=48`, 128×3 MLP):
+
+| Path | Two-stage (raster + tcnn) | Fused | Speedup |
+|---|---|---|---|
+| Inference forward | 8.4 ms (119 FPS) | 4.5 ms (222 FPS) | **1.86×** |
+| Training step (fwd+bwd) | 37.5 ms | 28.4 ms | **1.32×** |
+
+Expected gains are scene-dependent (roughly 1.1–1.9× for inference and 1.2–1.35× for training across the MipNeRF-360 scenes). The new kernel also achieves slightly better quality. The trainer (`--nht_fused`, on by default), the viewers, and `benchmarks/benchmark_nht.py` all use the fused path automatically when the shader config supports it, and fall back to the two-stage tcnn path otherwise. AOV mode in particular stays on the tcnn backend (see [AOV Mode](#aov-mode-rgb2x--lseg--dinov3)). The fused-vs-tcnn comparison above (forward + training step) can be reproduced with `python benchmarks/benchmark_nht.py --train --results_dir <results> --scene_dir <data>`.
+
+Plus, we have rebased on current gsplat, bringing a number of new features like new camera models. Check https://github.com/nerfstudio-project/gsplat for more.
+---
+
 ## Abstract
 
 Primitive-based methods such as 3D Gaussian Splatting have recently become the state-of-the-art for novel-view synthesis and related reconstruction tasks. Compared to neural fields, these representations are more flexible, adaptive, and scale better to large scenes. However, the limited expressivity of individual primitives makes modeling high-frequency detail challenging.
@@ -160,12 +184,27 @@ The viewer starts a [viser](https://viser.studio/) server. Open `http://localhos
 
 **Viewer render modes** (selectable in the UI dropdown):
 
-| Mode | Description |
-|---|---|
-| `rgb` | Final decoded RGB color (features -> MLP -> color) |
-| `depth(accumulated)` | Accumulated z-depth (alpha-weighted sum of depths) |
-| `depth(expected)` | Expected depth (accumulated depth normalized by alpha) |
-| `alpha` | Accumulated opacity / transmittance map |
+| Mode | Description | Fused kernel |
+|---|---|---|
+| `rgb` | Final decoded RGB color (features -> MLP -> color) | yes |
+| `alpha` | Accumulated opacity / transmittance map | yes |
+| `depth(accumulated)` | Accumulated z-depth (alpha-weighted sum of depths) | no |
+| `depth(expected)` | Expected depth (accumulated depth normalized by alpha) | no |
+| `normal` | Rendered surface normals | no |
+
+> **The viewer runs on the fused kernel by default.** The fused rasterize+MLP kernel emits RGB and alpha through a pinhole camera only, so the viewer greys out what it cannot render — the depth and normal modes are removed from the dropdown, and the **Camera**, **Ortho Scale**, **Anti-Aliasing** and **Radius Clip** controls are disabled, with an on-screen note explaining why. Near/far and 2D-epsilon stay live.
+>
+> To use any of them, relaunch the viewer on the two-stage rasterize + tcnn path:
+>
+> ```bash
+> bash scripts/view.sh --ckpt <ckpt.pt> --no_fused
+> ```
+>
+> ```powershell
+> .\scripts\view.ps1 -Ckpt <ckpt.pt> -NoFused
+> ```
+>
+> The trainer's embedded viewer follows the training config: it previews through the fused path (and applies the same restrictions) unless you train with `--no-nht_fused`.
 
 ### Evaluation
 
@@ -222,7 +261,8 @@ From the **repository root** (with the environment from [Installation](#installa
 | Paper Table 7 (high primitive count) | `bash benchmarks/nht/benchmark_nht_high.sh` |
 | AOV (LSEG / DINOv3/ RGB2X) | `bash benchmarks/nht/benchmark_nht_aov.sh` |
 | Basic MipNeRF360 trainer | `bash benchmarks/basic_nht.sh` |
-| Standalone **runtime** timing (raster + deferred MLP) | `python benchmarks/benchmark_nht.py --ckpt <ckpt.pt> --data_dir <scene_dir> --data_factor <N>` |
+| Standalone **runtime** timing (fused by default; `--unfused` for the two-stage breakdown) | `python benchmarks/benchmark_nht.py --ckpt <ckpt.pt> --data_dir <scene_dir> --data_factor <N>` |
+| Fused vs tcnn comparison (forward + training step) | `python benchmarks/benchmark_nht.py --train --ckpt <ckpt.pt> --data_dir <scene_dir> --data_factor <N>` |
 
 On Windows, use the matching scripts under `benchmarks/nht/` (for example `.\benchmarks\nht\benchmark_nht.ps1`).
 
@@ -391,6 +431,8 @@ Per-scene breakdown (3DGUT + NHT, 64F):
 ### AOV Mode (RGB2X / LSEG / DINOv3)
 
 > **Experimental:** AOV (arbitrary output variables / semantic heads) is an **experimental** feature and still **work in progress**. Expect varying quality and performance. 
+
+> **Note — AOV runs on the tcnn (unfused) backend.** The fused rasterize+MLP kernels decode a 16-wide padded sigmoid RGB output inside the rasterizer; AOV shaders instead decode hundreds of auxiliary channels per pixel (LSEG 512-d, DINOv3 384/768-d), often through a *second* split-head network with mixed per-channel activations. Emitting such wide outputs from the per-pixel warp epilogue would blow up register pressure and memory traffic and forfeit the fused kernel's advantage — those decodes are GEMM-bound and are exactly what tcnn's batched fully-fused MLP is already optimal for. AOV training and viewing therefore always use the two-stage rasterization + tcnn path (`aov/examples/*` do this automatically, and `simple_trainer_nht.py` turns `--nht_fused` off by itself when `--aov_target_key` is set); the fused kernels remain RGB-only for now. Small RGB2X-only bundles (`3 + K < 128` outputs) would be technically feasible in the fused kernel via a wider output pad, but are not worth the extra template surface while AOV is experimental.
 
 ```bash
 # LSEG features

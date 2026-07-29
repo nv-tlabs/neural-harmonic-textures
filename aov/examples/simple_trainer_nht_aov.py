@@ -57,14 +57,18 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal
 from utils import CameraOptModule, knn, set_random_seed
 
-from gsplat.nht.exporter import export_splats_nht
+from gsplat.nht.exporter import (
+    cast_state_dict_to_fp16,
+    cast_state_dict_to_fp32,
+    export_splats_nht,
+)
 from gsplat.color_correct import color_correct_affine, color_correct_quadratic
 from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
-from gsplat.nht.strategy import NHTMCMCStrategy as MCMCStrategy
-from gsplat_viewer_nht import GsplatNHTViewer, GsplatNHTRenderTabState
+from gsplat.strategy import MCMCStrategy
+from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 ## NHT ##
 from gsplat.nht.deferred_shader import HarmonicFeatures
@@ -723,7 +727,7 @@ class Runner:
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            self.viewer = GsplatNHTViewer(
+            self.viewer = GsplatViewer(
                 server=self.server,
                 render_fn=self._viewer_render_fn,
                 output_dir=Path(cfg.result_dir),
@@ -1289,7 +1293,15 @@ class Runner:
                     "w",
                 ) as f:
                     json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict()}
+                # NHT kernels consume features in fp16 and the tcnn backbone
+                # runs in fp16: store them as fp16 to halve disk usage without
+                # losing rendering precision.
+                splats_state = dict(self.splats.state_dict())
+                if "features" in splats_state:
+                    splats_state["features"] = splats_state["features"].detach().to(
+                        torch.float16
+                    )
+                data = {"step": step, "splats": splats_state}
                 data["aov_config"] = self.aov_detected_config
                 if cfg.pose_opt:
                     if world_size > 1:
@@ -1297,13 +1309,16 @@ class Runner:
                     else:
                         data["pose_adjust"] = self.pose_adjust.state_dict()
                 if world_size > 1:
-                    data["deferred_module"] = (
-                        self.deferred_module.module.state_dict()
-                    )
+                    deferred_sd = self.deferred_module.module.state_dict()
                 else:
-                    data["deferred_module"] = self.deferred_module.state_dict()
+                    deferred_sd = self.deferred_module.state_dict()
+                data["deferred_module"] = cast_state_dict_to_fp16(
+                    deferred_sd, prefix="backbone."
+                )
                 if self._ema_shadow is not None:
-                    data["deferred_ema"] = self._ema_shadow
+                    data["deferred_ema"] = cast_state_dict_to_fp16(
+                        self._ema_shadow, prefix="backbone."
+                    )
                 if self.post_processing_module is not None:
                     data["post_processing"] = self.post_processing_module.state_dict()
                 torch.save(
@@ -1751,19 +1766,31 @@ class Runner:
         compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
         os.makedirs(compress_dir, exist_ok=True)
 
-        self.compression_method.compress(compress_dir, self.splats)
+        # Downcast features to fp16 before compression: the NHT rasterizer
+        # always runs them in half precision, so this is lossless w.r.t.
+        # rendering and lets the NPZ ``features`` entry record an fp16 dtype.
+        # Using a plain dict copy also avoids mutating ``self.splats`` when
+        # the compressor preprocesses ``means`` / ``quats`` in place.
+        splats_for_compress: Dict[str, Tensor] = dict(self.splats)
+        if "features" in splats_for_compress:
+            splats_for_compress["features"] = (
+                splats_for_compress["features"].detach().to(torch.float16)
+            )
+        self.compression_method.compress(compress_dir, splats_for_compress)
 
         # evaluate compression
         splats_c = self.compression_method.decompress(compress_dir)
         for k in splats_c.keys():
-            self.splats[k].data = splats_c[k].to(self.device)
+            self.splats[k].data = splats_c[k].to(
+                device=self.device, dtype=self.splats[k].dtype
+            )
         self.eval(step=step, stage="compress")
 
     @torch.no_grad()
     def _viewer_render_fn(
         self, camera_state: CameraState, render_tab_state: RenderTabState
     ):
-        assert isinstance(render_tab_state, GsplatNHTRenderTabState)
+        assert isinstance(render_tab_state, GsplatRenderTabState)
         self._apply_ema()
         if render_tab_state.preview_render:
             width = render_tab_state.render_width
@@ -1875,15 +1902,20 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
             torch.load(file, map_location=runner.device, weights_only=True)
             for file in cfg.ckpt
         ]
+        # Older checkpoints store features in fp32, newer ones in fp16. Cast
+        # back to each Parameter's native dtype so the training-time precision
+        # is preserved in memory.
         for k in runner.splats.keys():
-            runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+            cat = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+            runner.splats[k].data = cat.to(runner.splats[k].dtype)
         if runner.post_processing_module is not None:
             pp_state = ckpts[0].get("post_processing")
             if pp_state is not None:
                 runner.post_processing_module.load_state_dict(pp_state)
         step = ckpts[0]["step"]
-        # recover deferred module
-        ckpt_sd = ckpts[0]["deferred_module"]
+        # recover deferred module — upcast fp16 backbone weights to fp32
+        # master precision before loading into the module.
+        ckpt_sd = cast_state_dict_to_fp32(ckpts[0]["deferred_module"])
         target = (
             runner.deferred_module.module
             if world_size > 1
@@ -1892,7 +1924,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         target.load_state_dict(ckpt_sd)
         target.eval()
         if runner._ema_shadow is not None and "deferred_ema" in ckpts[0]:
-            runner._ema_shadow = ckpts[0]["deferred_ema"]
+            runner._ema_shadow = cast_state_dict_to_fp32(ckpts[0]["deferred_ema"])
         # run eval and render trajectory
         runner.eval(step=step)
         runner.render_traj(step=step)

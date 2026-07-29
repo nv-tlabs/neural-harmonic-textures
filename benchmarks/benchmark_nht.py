@@ -15,16 +15,39 @@
 
 """NHT Rendering Benchmark.
 
-Measures per-component execution time of the NHT rendering pipeline
-using CUDA events for accurate GPU timing.
+Measures execution time of the NHT rendering pipeline using CUDA events
+for accurate GPU timing.
 
-Each scene is benchmarked in an isolated subprocess.  Rasterization and
-MLP are timed in SEPARATE passes to avoid GPU power-state coupling
-(a heavy rasterization kernel draws enough power to throttle GPU clocks,
-making the immediately-following MLP appear slower than it really is).
+By DEFAULT the fully-fused inference path is timed end-to-end: one
+``NHTInferenceRenderer`` launch per frame (projection + binning + the
+fused rasterize+MLP kernel). Pass ``--unfused`` to instead time the
+legacy two-stage path with a per-component breakdown — rasterization and
+the tcnn MLP are timed in SEPARATE passes to avoid GPU power-state
+coupling (a heavy rasterization kernel draws enough power to throttle GPU
+clocks, making the immediately-following MLP appear slower than it really
+is). The benchmark auto-falls back to the unfused breakdown when the
+checkpoint's shader config has no compiled fused instantiation.
 
-Usage (single scene):
+Pass ``--train`` for the fused-vs-tcnn comparison: forward-only (fused
+``NHTInferenceRenderer`` vs the two-stage rasterization + tcnn MLP) and a
+full training step (``nht_fused_render`` fwd+bwd vs the rasterizer/tcnn
+autograd path). This reports per-path timings and speedups instead of the
+inference-only breakdown.
+
+Each scene is benchmarked in an isolated subprocess.
+
+Usage (single scene, fused — default):
     python benchmark_nht.py --ckpt results/garden/ckpts/ckpt_29999_rank0.pt \
+        --data_dir data/360_v2/garden --data_factor 4
+
+Usage (single scene, unfused component breakdown):
+    python benchmark_nht.py --unfused \
+        --ckpt results/garden/ckpts/ckpt_29999_rank0.pt \
+        --data_dir data/360_v2/garden --data_factor 4
+
+Usage (single scene, fused vs tcnn forward + training step):
+    python benchmark_nht.py --train \
+        --ckpt results/garden/ckpts/ckpt_29999_rank0.pt \
         --data_dir data/360_v2/garden --data_factor 4
 
 Usage (all scenes under a results folder):
@@ -80,6 +103,35 @@ TANDT_SCENES = {"train", "truck"}
 DB_SCENES = {"drjohnson", "playroom"}
 INDOOR_SCENES = M360_INDOOR  # backward compat
 TIMING_KEYS = ["rasterization", "deferred_mlp", "total"]
+# Keys used by the fused-vs-tcnn comparison (--train).
+TRAIN_TIMING_KEYS = ["fwd_fused", "fwd_tcnn", "fwd_bwd_fused", "fwd_bwd_tcnn"]
+
+
+def _time_once(fn) -> float:
+    """Time a single GPU call with CUDA events (ms)."""
+    import torch
+
+    torch.cuda.synchronize()
+    s = torch.cuda.Event(enable_timing=True)
+    e = torch.cuda.Event(enable_timing=True)
+    s.record()
+    fn()
+    e.record()
+    torch.cuda.synchronize()
+    return s.elapsed_time(e)
+
+
+def _cuda_time(fn, n_warmup: int, n_iters: int) -> float:
+    """Mean GPU time (ms) over ``n_iters`` calls after ``n_warmup`` warmups."""
+    import torch
+
+    for _ in range(n_warmup):
+        fn()
+    torch.cuda.synchronize()
+    total = 0.0
+    for _ in range(n_iters):
+        total += _time_once(fn)
+    return total / n_iters if n_iters else 0.0
 
 
 def get_scene_factor(scene: str) -> int:
@@ -126,7 +178,11 @@ def aggregate_timing(all_results, scene_list):
             key = f"{k}_ms"
             vals = [all_results[s].get(key, all_results[s].get(k, 0)) for s in scenes]
             row[key] = sum(vals) / len(vals) if vals else 0
-        row["overhead_ms"] = row["total_ms"] - row["rasterization_ms"] - row["deferred_mlp_ms"]
+        # Fused rows carry no raster/MLP split (both 0) -> no separate overhead.
+        if row["rasterization_ms"] == 0 and row["deferred_mlp_ms"] == 0:
+            row["overhead_ms"] = 0.0
+        else:
+            row["overhead_ms"] = row["total_ms"] - row["rasterization_ms"] - row["deferred_mlp_ms"]
         row["fps"] = 1000.0 / row["total_ms"] if row["total_ms"] > 0 else 0
         rml = row["rasterization_ms"] + row["deferred_mlp_ms"]
         row["fps_raster_mlp"] = 1000.0 / rml if rml > 0 else 0
@@ -146,6 +202,9 @@ def aggregate_timing(all_results, scene_list):
 
 
 def print_scene_results(name, d):
+    if d.get("mode") == "train" or "fwd_bwd_fused_ms" in d:
+        _print_training_scene(name, d)
+        return
     total = d.get("total_ms", 0) or d.get("total", 0)
     raster = d.get("rasterization_ms", 0) or d.get("rasterization", 0)
     mlp = d.get("deferred_mlp_ms", 0) or d.get("deferred_mlp", 0)
@@ -153,15 +212,85 @@ def print_scene_results(name, d):
     num_gs = d.get("num_gs", 0)
     w, h = d.get("width", 0), d.get("height", 0)
     n_img = d.get("num_images", 0)
+    mode = d.get("mode", "fused" if (raster == 0 and mlp == 0) else "unfused")
 
-    print(f"\n  {name} ({num_gs} GS, {w}x{h}, {n_img} imgs)")
-    for label, val in [("rasterization", raster), ("deferred_mlp", mlp)]:
-        pct = val / total * 100 if total > 0 else 0
-        print(f"    {label:23s}: {val:8.2f} ms  ({pct:5.1f}%)")
-    if abs(overhead) > 0.01:
-        print(f"    {'overhead':23s}: {overhead:8.2f} ms  ({overhead/total*100:5.1f}%)")
+    print(f"\n  {name} ({num_gs} GS, {w}x{h}, {n_img} imgs) [{mode}]")
+    if mode != "fused":
+        for label, val in [("rasterization", raster), ("deferred_mlp", mlp)]:
+            pct = val / total * 100 if total > 0 else 0
+            print(f"    {label:23s}: {val:8.2f} ms  ({pct:5.1f}%)")
+        if abs(overhead) > 0.01:
+            print(f"    {'overhead':23s}: {overhead:8.2f} ms  ({overhead/total*100:5.1f}%)")
     fps = 1000.0 / total if total > 0 else 0
     print(f"    {'total':23s}: {total:8.2f} ms  ({fps:.1f} FPS)")
+
+
+def _print_training_scene(name, d):
+    ff = d.get("fwd_fused_ms", 0)
+    ft = d.get("fwd_tcnn_ms", 0)
+    fbf = d.get("fwd_bwd_fused_ms", 0)
+    fbt = d.get("fwd_bwd_tcnn_ms", 0)
+    num_gs = d.get("num_gs", 0)
+    w, h = d.get("width", 0), d.get("height", 0)
+    n_img = d.get("num_images", 0)
+
+    print(f"\n  {name} ({num_gs:,} GS, {w}x{h}, {n_img} imgs) [train]")
+    print("    --- forward only (inference) ---")
+    print(f"    {'fwd fused':23s}: {ff:8.2f} ms  ({1000.0/ff:.1f} FPS)" if ff > 0
+          else f"    {'fwd fused':23s}: n/a")
+    print(f"    {'fwd tcnn':23s}: {ft:8.2f} ms  ({1000.0/ft:.1f} FPS)" if ft > 0
+          else f"    {'fwd tcnn':23s}: n/a")
+    if ff > 0 and ft > 0:
+        print(f"    {'fwd speedup':23s}: {ft/ff:8.2f}x")
+    print("    --- forward + backward (training step) ---")
+    print(f"    {'fwd+bwd fused':23s}: {fbf:8.2f} ms  ({1000.0/fbf:.1f} it/s)" if fbf > 0
+          else f"    {'fwd+bwd fused':23s}: n/a")
+    print(f"    {'fwd+bwd tcnn':23s}: {fbt:8.2f} ms  ({1000.0/fbt:.1f} it/s)" if fbt > 0
+          else f"    {'fwd+bwd tcnn':23s}: n/a")
+    if fbf > 0 and fbt > 0:
+        print(f"    {'fwd+bwd speedup':23s}: {fbt/fbf:8.2f}x")
+
+
+def aggregate_training(all_results, scene_list):
+    groups = [
+        ("M360-In", M360_INDOOR), ("M360-Out", M360_OUTDOOR),
+        ("M360", M360_INDOOR | M360_OUTDOOR),
+        ("T&T", TANDT_SCENES), ("DB", DB_SCENES), ("Overall", None),
+    ]
+    rows = []
+    for label, members in groups:
+        if members is None:
+            scenes = [s for s in scene_list if s in all_results]
+        else:
+            scenes = [s for s in scene_list if s in members and s in all_results]
+        if not scenes:
+            continue
+        row = OrderedDict([("split", label), ("n", len(scenes))])
+        for k in TRAIN_TIMING_KEYS:
+            vals = [all_results[s].get(f"{k}_ms", 0) for s in scenes]
+            row[f"{k}_ms"] = sum(vals) / len(vals) if vals else 0
+        ff, ft = row["fwd_fused_ms"], row["fwd_tcnn_ms"]
+        fbf, fbt = row["fwd_bwd_fused_ms"], row["fwd_bwd_tcnn_ms"]
+        row["fwd_speedup"] = ft / ff if ff > 0 else 0
+        row["fwd_bwd_speedup"] = fbt / fbf if fbf > 0 else 0
+        row["avg_num_gs"] = int(
+            sum(all_results[s].get("num_gs", 0) for s in scenes) / len(scenes))
+        rows.append(row)
+    return rows
+
+
+def print_training_table(rows):
+    print(f"\n{'='*100}")
+    print("  Aggregated Fused-vs-tcnn Timing Results")
+    print(f"{'='*100}")
+    print("  | Split    |  N | fwd_fused | fwd_tcnn | fwd_x | fb_fused | fb_tcnn | fwd_bwd_x |   Avg #GS |")
+    print("  |----------|----|-----------|----------|-------|----------|---------|-----------|-----------|")
+    for r in rows:
+        print(f"  | {r['split']:<8} | {r['n']:>2} | {r['fwd_fused_ms']:>9.2f} | "
+              f"{r['fwd_tcnn_ms']:>8.2f} | {r['fwd_speedup']:>4.2f}x | "
+              f"{r['fwd_bwd_fused_ms']:>8.2f} | {r['fwd_bwd_tcnn_ms']:>7.2f} | "
+              f"{r['fwd_bwd_speedup']:>8.2f}x | {r['avg_num_gs']:>9,} |")
+    print(f"{'='*100}\n")
 
 
 def print_aggregation_table(rows):
@@ -205,6 +334,7 @@ def save_summary_json(results_dir, all_results, rows):
 def _run_scene_benchmark(args):
     from collections import defaultdict
     import torch
+    from gsplat.nht import NHTParams
     from gsplat.nht.deferred_shader import DeferredShaderModule
     from gsplat.rendering import rasterization
 
@@ -301,14 +431,250 @@ def _run_scene_benchmark(args):
             viewmats=vm, Ks=K,
             width=width, height=height, tile_size=16,
             packed=False, absgrad=False,
-            rasterize_mode="antialiased", render_mode="RGB",
+            # 3DGUT (with_ut + with_eval3d, the NHT path) only supports
+            # rasterize_mode="classic"; this mirrors the trainer's default.
+            rasterize_mode="classic", render_mode="RGB",
             camera_model="pinhole",
-            with_ut=True, with_eval3d=True, nht=True,
-            center_ray_mode=dm.center_ray_encoding,
-            ray_dir_scale=dm.ray_dir_scale,
+            with_ut=True, with_eval3d=True,
+            nht_params=NHTParams(
+                center_ray_mode=dm.center_ray_encoding,
+                ray_dir_scale=dm.ray_dir_scale,
+            ),
         )
 
     # ------------------------------------------------------------------
+    #  Fused-vs-tcnn comparison (--train): forward-only (fused inference
+    #  renderer vs two-stage rasterization + tcnn MLP) and a full training
+    #  step (nht_fused_render fwd+bwd vs the rasterizer/tcnn autograd path).
+    # ------------------------------------------------------------------
+    if args.train:
+        import torch.nn.functional as F
+        from gsplat.nht import nht_fused_render, nht_fused_supported
+        from gsplat.nht._inference_renderer import (
+            NHTInferenceConfig,
+            NHTInferenceRenderer,
+        )
+
+        supported, reason = nht_fused_supported(dm, for_training=True)
+        if not supported:
+            raise SystemExit(
+                f"  --train requires a fused-trainable shader config; "
+                f"unsupported: {reason}"
+            )
+
+        features = colors.half()
+        renderer = NHTInferenceRenderer(
+            dm,
+            NHTInferenceConfig(tile_size=16, center_ray_mode=dm.center_ray_encoding),
+        )
+        splats_dict = dict(splats)
+
+        def _tcnn_forward(K, vm):
+            rc, _, _ = rasterization(
+                means=means, quats=F.normalize(quats, dim=-1),
+                scales=scales, opacities=opacities, colors=features,
+                viewmats=vm, Ks=K, width=width, height=height,
+                sh_degree=None, near_plane=0.01, far_plane=1e10, packed=False,
+                with_ut=True, with_eval3d=True,
+                nht_params=NHTParams(
+                    center_ray_mode=dm.center_ray_encoding,
+                    ray_dir_scale=dm.ray_dir_scale,
+                ),
+                render_mode="RGB",
+            )
+            feat_ray = rc[0].reshape(-1, rc.shape[-1])
+            out = dm._run_backbone(feat_ray.half())
+            if not dm.tcnn_emitted_sigmoid_outputs:
+                out = torch.sigmoid(out.float())
+            return out[:, :3].float().view(height, width, 3)
+
+        warmup_frames = min(args.warmup_frames, n_val * 2)
+        print(f"  JIT warmup ({warmup_frames} frames, fused + tcnn) ...")
+        with torch.no_grad():
+            for j in range(warmup_frames):
+                K, vm = _prepare(j % n_val)
+                renderer.render(splats_dict, vm[0], K[0], width, height)
+                _tcnn_forward(K, vm)
+        torch.cuda.synchronize()
+
+        # Forward-only comparison, per view (interleaved to share power state).
+        fwd_fused_accum = fwd_tcnn_accum = 0.0
+        fwd_count = 0
+        print(f"  Timing forward fused vs tcnn "
+              f"({args.num_passes} passes x {n_val} imgs) ...")
+        with torch.no_grad():
+            for _ in range(args.num_passes):
+                for i in range(n_val):
+                    K, vm = _prepare(i)
+                    fwd_fused_accum += _time_once(
+                        lambda: renderer.render(splats_dict, vm[0], K[0], width, height))
+                    fwd_tcnn_accum += _time_once(lambda: _tcnn_forward(K, vm))
+                    fwd_count += 1
+
+        # Full training step on a single fixed view.
+        K0, vm0 = _prepare(0)
+        target = torch.rand(height, width, 3, device=device)
+        means_t = means.detach().clone().requires_grad_(True)
+        quats_t = quats.detach().clone().requires_grad_(True)
+        scales_t = splats["scales"].detach().clone().requires_grad_(True)
+        opac_t = splats["opacities"].detach().clone().requires_grad_(True)
+        feat_t = features.detach().float().clone().requires_grad_(True)
+        params_t = dm.backbone.params.detach().clone().requires_grad_(True)
+
+        def _clear_grads():
+            for t in (means_t, quats_t, scales_t, opac_t, feat_t, params_t):
+                t.grad = None
+
+        def step_fwd_bwd_tcnn():
+            _clear_grads()
+            rc, _, _ = rasterization(
+                means=means_t, quats=F.normalize(quats_t, dim=-1),
+                scales=torch.exp(scales_t), opacities=torch.sigmoid(opac_t),
+                colors=feat_t.half(), viewmats=vm0, Ks=K0,
+                width=width, height=height, sh_degree=None,
+                near_plane=0.01, far_plane=1e10, packed=False,
+                with_ut=True, with_eval3d=True,
+                nht_params=NHTParams(
+                    center_ray_mode=dm.center_ray_encoding,
+                    ray_dir_scale=dm.ray_dir_scale,
+                ),
+                render_mode="RGB",
+            )
+            feat_ray = rc[0].reshape(-1, rc.shape[-1])
+            out = dm._run_backbone(feat_ray.half())
+            if not dm.tcnn_emitted_sigmoid_outputs:
+                out = torch.sigmoid(out.float())
+            rgb = out[:, :3].float().view(height, width, 3)
+            (rgb - target).abs().mean().backward()
+
+        def step_fwd_bwd_fused():
+            _clear_grads()
+            rgb, _ = nht_fused_render(
+                means=means_t, quats=F.normalize(quats_t, dim=-1),
+                scales=torch.exp(scales_t), features=feat_t,
+                opacities=torch.sigmoid(opac_t), mlp_params=params_t,
+                viewmat=vm0[0], K=K0[0], width=width, height=height,
+                tile_size=16, ray_dir_scale=dm.ray_dir_scale,
+                center_ray_mode=dm.center_ray_encoding,
+                mlp_hidden_dim=dm.mlp_hidden_dim, mlp_num_layers=dm.mlp_num_layers,
+            )
+            (rgb - target).abs().mean().backward()
+
+        bwd_iters = args.num_passes * max(1, args.training_iters)
+        print(f"  Timing fwd+bwd fused ({bwd_iters} iters) ...")
+        fb_fused = _cuda_time(step_fwd_bwd_fused, args.warmup_frames, bwd_iters)
+        print(f"  Timing fwd+bwd tcnn ({bwd_iters} iters) ...")
+        fb_tcnn = _cuda_time(step_fwd_bwd_tcnn, args.warmup_frames, bwd_iters)
+
+        ff = fwd_fused_accum / fwd_count if fwd_count else 0
+        ft = fwd_tcnn_accum / fwd_count if fwd_count else 0
+        result = OrderedDict([
+            ("scene", args.scene_name or os.path.basename(args.data_dir)),
+            ("num_gs", num_gs),
+            ("width", width),
+            ("height", height),
+            ("num_images", fwd_count),
+            ("fwd_fused_ms", ff),
+            ("fwd_tcnn_ms", ft),
+            ("fwd_bwd_fused_ms", fb_fused),
+            ("fwd_bwd_tcnn_ms", fb_tcnn),
+            ("fwd_speedup", ft / ff if ff > 0 else 0),
+            ("fwd_bwd_speedup", fb_tcnn / fb_fused if fb_fused > 0 else 0),
+            ("fwd_fps_fused", 1000.0 / ff if ff > 0 else 0),
+            ("fwd_fps_tcnn", 1000.0 / ft if ft > 0 else 0),
+            ("fwd_bwd_fps_fused", 1000.0 / fb_fused if fb_fused > 0 else 0),
+            ("fwd_bwd_fps_tcnn", 1000.0 / fb_tcnn if fb_tcnn > 0 else 0),
+            ("mode", "train"),
+        ])
+
+        print_scene_results(result["scene"], result)
+        if args.save_json:
+            save_timing_json(args.save_json, result)
+            print(f"    Saved: {args.save_json}")
+        return result
+
+    # ------------------------------------------------------------------
+    #  Fused inference timing (default): one fully-fused rasterize+MLP
+    #  kernel per frame via NHTInferenceRenderer. Falls back to the
+    #  unfused component breakdown below when --unfused is passed or the
+    #  checkpoint's shader config has no compiled fused instantiation.
+    # ------------------------------------------------------------------
+    use_fused = not args.unfused
+    if use_fused:
+        from gsplat.nht import nht_fused_supported
+
+        supported, reason = nht_fused_supported(dm, for_training=False)
+        if not supported:
+            print(f"  Fused kernel unavailable ({reason}); using unfused breakdown.")
+            use_fused = False
+
+    if use_fused:
+        from gsplat.nht._inference_renderer import (
+            NHTInferenceConfig,
+            NHTInferenceRenderer,
+        )
+
+        renderer = NHTInferenceRenderer(
+            dm,
+            NHTInferenceConfig(tile_size=16, center_ray_mode=dm.center_ray_encoding),
+        )
+        splats_dict = dict(splats)
+
+        warmup_frames = min(args.warmup_frames, n_val * 2)
+        print(f"  JIT warmup ({warmup_frames} frames, fused) ...")
+        with torch.no_grad():
+            for j in range(warmup_frames):
+                K, vm = _prepare(j % n_val)
+                renderer.render(splats_dict, vm[0], K[0], width, height)
+        torch.cuda.synchronize()
+
+        # End-to-end fused timing (projection + binning + fused kernel).
+        # Views are scanned sequentially so the renderer's per-view
+        # projection cache never short-circuits a timed frame.
+        total_accum = 0.0
+        total_count = 0
+        print(f"  Timing fused end-to-end ({args.num_passes} passes x {n_val} imgs) ...")
+        with torch.no_grad():
+            for _ in range(args.num_passes):
+                for i in range(n_val):
+                    K, vm = _prepare(i)
+                    torch.cuda.synchronize()
+                    s = torch.cuda.Event(enable_timing=True)
+                    e = torch.cuda.Event(enable_timing=True)
+                    s.record()
+                    renderer.render(splats_dict, vm[0], K[0], width, height)
+                    e.record()
+                    torch.cuda.synchronize()
+                    total_accum += s.elapsed_time(e)
+                    total_count += 1
+
+        avg_total = total_accum / total_count if total_count else 0
+
+        result = OrderedDict([
+            ("scene", args.scene_name or os.path.basename(args.data_dir)),
+            ("num_gs", num_gs),
+            ("width", width),
+            ("height", height),
+            ("num_images", total_count),
+            ("rasterization_ms", 0.0),
+            ("deferred_mlp_ms", 0.0),
+            ("total_ms", avg_total),
+            ("overhead_ms", 0.0),
+            ("fps", 1000.0 / avg_total if avg_total > 0 else 0),
+            ("fps_raster_mlp", 1000.0 / avg_total if avg_total > 0 else 0),
+            ("mode", "fused"),
+        ])
+
+        print_scene_results(result["scene"], result)
+
+        if args.save_json:
+            save_timing_json(args.save_json, result)
+            print(f"    Saved: {args.save_json}")
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Unfused component breakdown (--unfused).
     # JIT warmup: run a few full frames so tcnn compiles its kernels.
     # ------------------------------------------------------------------
     warmup_frames = min(args.warmup_frames, n_val * 2)
@@ -407,6 +773,7 @@ def _run_scene_benchmark(args):
         ("fps", 1000.0 / avg_total if avg_total > 0 else 0),
         ("fps_raster_mlp", 1000.0 / (avg_raster + avg_mlp)
          if (avg_raster + avg_mlp) > 0 else 0),
+        ("mode", "unfused"),
     ])
 
     print_scene_results(result["scene"], result)
@@ -498,6 +865,10 @@ def _run_batch(args):
             "--scene_name", scene,
             "--save_json", json_path,
         ]
+        if args.unfused:
+            cmd.append("--unfused")
+        if args.train:
+            cmd += ["--train", "--training_iters", str(args.training_iters)]
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -517,14 +888,25 @@ def _run_batch(args):
         all_results[scene] = saved
 
     if all_results:
-        rows = aggregate_timing(all_results, scene_list)
-        print_aggregation_table(rows)
-        save_summary_json(args.results_dir, all_results, rows)
+        _aggregate_and_report(args, all_results, scene_list)
 
     if missing:
         print(f"  MISSING scenes: {', '.join(missing)}")
         print(f"  Re-run with: --scenes {','.join(missing)}")
         print()
+
+
+def _aggregate_and_report(args, all_results, scene_list):
+    """Pick the inference or fused-vs-tcnn aggregation based on result shape."""
+    is_train = any(v.get("mode") == "train" or "fwd_bwd_fused_ms" in v
+                   for v in all_results.values())
+    if is_train:
+        rows = aggregate_training(all_results, scene_list)
+        print_training_table(rows)
+    else:
+        rows = aggregate_timing(all_results, scene_list)
+        print_aggregation_table(rows)
+    save_summary_json(args.results_dir, all_results, rows)
 
 
 def _collect_only(args, scene_list):
@@ -545,9 +927,7 @@ def _collect_only(args, scene_list):
         print_scene_results(scene, saved)
 
     if all_results:
-        rows = aggregate_timing(all_results, scene_list)
-        print_aggregation_table(rows)
-        save_summary_json(args.results_dir, all_results, rows)
+        _aggregate_and_report(args, all_results, scene_list)
     if missing:
         print(f"  MISSING scenes: {', '.join(missing)}")
         print()
@@ -576,6 +956,17 @@ def main():
     p.add_argument("--num_passes", type=int, default=3)
     p.add_argument("--warmup_frames", type=int, default=10,
                     help="Frames of full pipeline to run for JIT warmup (default 10)")
+    p.add_argument("--unfused", action="store_true",
+                    help="Time the legacy two-stage path (rasterization + tcnn "
+                         "MLP) with a per-component breakdown instead of the "
+                         "default fused end-to-end inference timing.")
+    p.add_argument("--train", action="store_true",
+                    help="Benchmark the fused fwd+bwd training step vs the "
+                         "rasterizer/tcnn autograd path (and forward-only fused "
+                         "vs tcnn), reporting per-path timings and speedups "
+                         "instead of the inference-only breakdown.")
+    p.add_argument("--training_iters", type=int, default=20,
+                    help="Timed iterations per fwd+bwd measurement (with --train).")
 
     p.add_argument("--feature_dim", type=int, default=0)
     p.add_argument("--enable_view_encoding", action="store_true", default=True)

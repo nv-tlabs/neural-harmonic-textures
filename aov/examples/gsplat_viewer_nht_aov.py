@@ -30,10 +30,10 @@ from typing import Callable, List, Literal, Optional
 import viser
 from nerfview import Viewer
 
-from gsplat_viewer_nht import GsplatNHTViewer, GsplatNHTRenderTabState
+from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 
 
-class GsplatNHTAOVRenderTabState(GsplatNHTRenderTabState):
+class GsplatNHTAOVRenderTabState(GsplatRenderTabState):
     """Render tab state for NHT AOV viewer with semantic segmentation support."""
 
     aov_modes: tuple = ()
@@ -47,7 +47,7 @@ class GsplatNHTAOVRenderTabState(GsplatNHTRenderTabState):
     # seg_click_feature, seg_similarity_map stored on the main script side.
 
 
-class GsplatNHTAOVViewer(GsplatNHTViewer):
+class GsplatNHTAOVViewer(GsplatViewer):
     """Viewer for gsplat NHT AOV models with PCA, RGB2X, and segmentation UI."""
 
     def __init__(

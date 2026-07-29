@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nht"
-version = "0.0.0"
+version = "1.1.0"
 description = "NHT release (dataset wrapper and training/view scripts)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ dependencies = [
     "setuptools>64,<80",
     "wheel",
     "ninja",
-    "numpy",
+    "numpy<2.0.0",
     "rich",
     "torch==2.9.1",
     "torchvision==0.24.1",

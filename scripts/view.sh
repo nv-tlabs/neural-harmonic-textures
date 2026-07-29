@@ -19,6 +19,10 @@
 # Usage:
 #   ./scripts/view.sh --ckpt results/benchmark_nht/garden/ckpts/ckpt_29999_rank0.pt
 #   ./scripts/view.sh --ckpt results/benchmark_nht/garden/ckpts/ckpt_29999_rank0.pt --port 8082
+#
+# The viewer renders with the fully-fused rasterize+MLP kernel by default, which
+# supports RGB and alpha through a pinhole camera only. Pass --no_fused for
+# depth, normals, non-pinhole cameras, antialiasing or radius clipping.
 
 set -euo pipefail
 
@@ -30,6 +34,7 @@ CKPT=""
 OUTPUT_DIR=""
 PORT=8080
 GPU=0
+NO_FUSED=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --output_dir) OUTPUT_DIR="$2";  shift 2 ;;
         --port)       PORT="$2";        shift 2 ;;
         --gpu)        GPU="$2";         shift 2 ;;
+        --no_fused)   NO_FUSED=1;       shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -60,12 +66,16 @@ args=(
     --output_dir "$OUTPUT_DIR"
     --port "$PORT"
 )
+if [[ "$NO_FUSED" == "1" ]]; then
+    args+=(--no_fused)
+fi
 
 echo "============================================"
 echo "NHT Viewer"
 echo "  Checkpoint: $CKPT"
 echo "  Port:       $PORT"
 echo "  Output:     $OUTPUT_DIR"
+echo "  Kernel:     $([[ "$NO_FUSED" == "1" ]] && echo "two-stage (rasterize + tcnn)" || echo "fused (RGB/alpha, pinhole)")"
 echo "============================================"
 echo "Open http://localhost:$PORT in your browser"
 
