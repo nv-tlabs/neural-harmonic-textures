@@ -23,11 +23,18 @@
 .DESCRIPTION
     Result layout: <OutputRoot>\<scene> (default OutputRoot: <repo>\results\benchmark_nht)
 
+    Runtime timing uses the fully-fused inference path by default. Pass
+    -Unfused to time the legacy two-stage rasterization + tcnn-MLP path with
+    a per-component breakdown instead. Pass -Train for the fused-vs-tcnn
+    comparison (forward + full training step, with speedups).
+
 .EXAMPLE
     .\benchmarks\nht\benchmark_nht.ps1
     .\benchmarks\nht\benchmark_nht.ps1 -Scenes garden,truck
     .\benchmarks\nht\benchmark_nht.ps1 -OutputRoot D:\runs\nht_table2
     .\benchmarks\nht\benchmark_nht.ps1 -RuntimeOnly
+    .\benchmarks\nht\benchmark_nht.ps1 -RuntimeOnly -Unfused
+    .\benchmarks\nht\benchmark_nht.ps1 -RuntimeOnly -Train
     .\benchmarks\nht\benchmark_nht.ps1 -MetricsOnly -Step 29999
 #>
 param(
@@ -39,6 +46,9 @@ param(
     [int]$Step           = -1,
     [int]$NumPasses      = 3,
     [int]$WarmupFrames   = 10,
+    [int]$TrainingIters  = 20,
+    [switch]$Unfused,
+    [switch]$Train,
     [switch]$MetricsOnly,
     [switch]$RuntimeOnly,
     [ValidateSet("vgg","alex")]
@@ -64,21 +74,27 @@ $m360Outdoor = @("garden", "bicycle", "stump", "treehill", "flowers")
 $tandtScenes = @("train", "truck")
 $dbScenes    = @("drjohnson", "playroom")
 
+function Resolve-SceneDir([string]$Root, [string]$Prefix, [string]$Scene) {
+    $direct = "$Root/$Scene"
+    if (Test-Path $direct) { return $direct }
+    return "$Root/$Prefix/$Scene"
+}
+
 $jobs = @()
 if (-not $SkipMipNeRF360) {
     foreach ($s in ($m360Indoor + $m360Outdoor)) {
         $factor = if ($m360Indoor -contains $s) { 2 } else { 4 }
-        $jobs += ,@($s, "$DataRoot/mipnerf360/$s", $factor, "mipnerf360")
+        $jobs += ,@($s, (Resolve-SceneDir $DataRoot "mipnerf360" $s), $factor, "mipnerf360")
     }
 }
 if (-not $SkipTandT) {
     foreach ($s in $tandtScenes) {
-        $jobs += ,@($s, "$DataRoot/tandt_db/tandt/$s", 1, "tandt")
+        $jobs += ,@($s, (Resolve-SceneDir $DataRoot "tandt_db/tandt" $s), 1, "tandt")
     }
 }
 if (-not $SkipDB) {
     foreach ($s in $dbScenes) {
-        $jobs += ,@($s, "$DataRoot/tandt_db/db/$s", 1, "deepblending")
+        $jobs += ,@($s, (Resolve-SceneDir $DataRoot "tandt_db/db" $s), 1, "deepblending")
     }
 }
 
@@ -176,6 +192,8 @@ if (-not $MetricsOnly) {
         "--warmup_frames", $WarmupFrames,
         "--gpu", $GPU
     )
+    if ($Unfused) { $benchArgs += "--unfused" }
+    if ($Train) { $benchArgs += @("--train", "--training_iters", $TrainingIters) }
     $env:CUDA_VISIBLE_DEVICES = $GPU
     python @benchArgs
 }
@@ -211,6 +229,21 @@ if (-not $RuntimeOnly) {
             $allMetrics[$scene] = @{}
             foreach ($k in $metricKeys) {
                 if ($null -ne $json.$k) { $allMetrics[$scene][$k] = [double]$json.$k }
+            }
+        }
+
+        # Fused-vs-tcnn timing, if this run used -Train (timing.json holds the
+        # forward + fwd+bwd comparison written by benchmark_nht.py --train).
+        $timingFile = "$statsDir\timing.json"
+        if (Test-Path $timingFile) {
+            $timing = Get-Content $timingFile -Raw | ConvertFrom-Json
+            if ($null -ne $timing.fwd_bwd_fused_ms) {
+                $fwdSpd = if ($timing.fwd_speedup) { $timing.fwd_speedup } else { 0 }
+                $fbSpd = if ($timing.fwd_bwd_speedup) { $timing.fwd_bwd_speedup } else { 0 }
+                Write-Host ("    Fwd:     fused={0:F2}ms tcnn={1:F2}ms spd={2:F2}x" -f `
+                    $timing.fwd_fused_ms, $timing.fwd_tcnn_ms, $fwdSpd) -ForegroundColor Cyan
+                Write-Host ("    Fwd+Bwd: fused={0:F2}ms tcnn={1:F2}ms spd={2:F2}x" -f `
+                    $timing.fwd_bwd_fused_ms, $timing.fwd_bwd_tcnn_ms, $fbSpd) -ForegroundColor Cyan
             }
         }
     }
