@@ -39,14 +39,16 @@ To celebrate, we have added **fully-fused rasterize+MLP kernels** (now the defau
 
 NHT rendering and training now run on new fully-fused CUDA kernels that evaluate the deferred MLP inline in the rasterizer (warp-cooperative WMMA, no intermediate feature-buffer round trip and no separate tcnn launches). The backward is fused too: a single kernel backpropagates dL/dRGB and dL/dalpha to the splat parameters *and* the MLP weights, with per-block weight-gradient accumulation in shared memory.
 
-Measured on an RTX 4090 (garden, 1M primitives, 1920×1080, `feature_dim=48`, 128×3 MLP):
+Measured on an RTX 4090 (garden, 1M primitives, 1667×1080 (~1080p), `feature_dim=48`, 128×3 MLP; training figures over 3,000 iterations, inference over 300):
 
-| Path | Two-stage (raster + tcnn) | Fused | Speedup |
+| Metric | Two-stage (raster + tcnn) | Fused | Improvement |
 |---|---|---|---|
-| Inference forward | 8.4 ms (119 FPS) | 4.5 ms (222 FPS) | **1.86×** |
-| Training step (fwd+bwd) | 37.5 ms | 28.4 ms | **1.32×** |
+| Inference time | 5.47 ms (183 FPS) | 4.35 ms (230 FPS) | **1.26×** |
+| Inference memory | 2.53 GB | 1.88 GB | **-26%** |
+| Training step (fwd+bwd) | 57.78 ms (17.3 it/s) | 24.57 ms (40.7 it/s) | **2.35×** |
+| Training memory | 4.53 GB | 2.56 GB | **-44%** |
 
-Expected gains are scene, and mostly resolution-dependent (roughly 1.1–1.9× for inference and 1.2–1.35× for training across the MipNeRF-360 scenes). Memory usage is drastically reduced, and the new kernel also achieves slightly better quality. The trainer (`--nht_fused`, on by default), the viewers, and `benchmarks/benchmark_nht.py` all use the fused path automatically when the shader config supports it, and fall back to the two-stage tcnn path otherwise. AOV mode in particular stays on the tcnn backend (see [AOV Mode](#aov-mode-rgb2x--lseg--dinov3)). The fused-vs-tcnn comparison above (forward + training step) can be reproduced with `python benchmarks/benchmark_nht.py --train --results_dir <results> --scene_dir <data>`.
+Expected gains are scene, and mostly resolution-dependent (roughly 1.1–1.9× for inference and 1.2–1.35× for training across the MipNeRF-360 scenes). Memory usage is drastically reduced too: fusing the rasterizer and MLP skips the intermediate feature buffer and tcnn's separate allocator. The new kernel also achieves slightly better quality. The trainer (`--nht_fused`, on by default), the viewers, and `benchmarks/benchmark_nht.py` all use the fused path automatically when the shader config supports it, and fall back to the two-stage tcnn path otherwise. AOV mode in particular stays on the tcnn backend (see [AOV Mode](#aov-mode-rgb2x--lseg--dinov3)). The comparison above can be reproduced with `python benchmarks/benchmark_nht.py --train --results_dir <results> --scene_dir <data>` (timing) and `python scripts/profile_nht_memory.py --cases fused_infer unfused_infer fused_train unfused_train --scales <scale> --iters <n> --ckpt <ckpt> --data-dir <scene>` (memory).
 
 Plus, we have rebased on current gsplat, bringing a number of new features like new camera models. Check https://github.com/nerfstudio-project/gsplat for more.
 ---
